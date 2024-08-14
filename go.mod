@@ -6,7 +6,7 @@ toolchain go1.22.5
 
 require (
 	github.com/gdamore/tcell/v2 v2.7.4
-	github.com/memmaker/go v0.0.0-20240806170701-0cfc5c63ae48
+	github.com/memmaker/go v0.0.0-20240812132939-c82d9069777e
 )
 
 require (

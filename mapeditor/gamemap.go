@@ -88,12 +88,21 @@ func TileFromRecord(record recfile.Record) NamedTile {
 	return tile
 }
 
-type PositionMap map[geometry.Point]textiles.IconRecord
+type IconPositionMap map[geometry.Point]textiles.IconRecord
 
-func (p PositionMap) ToRecords() []recfile.Record {
+func (p IconPositionMap) ToRecords() []recfile.Record {
 	records := make([]recfile.Record, 0, len(p))
 	for pos, obj := range p {
 		records = append(records, obj.ToRecordWithPosition(pos))
+	}
+	return records
+}
+func (p IconPositionMap) ToRecordsWithoutIcons() []recfile.Record {
+	records := make([]recfile.Record, 0, len(p))
+	for pos, obj := range p {
+		record := obj.ToRecordWithPosition(pos)
+		record = record.WithoutFieldsIgnoreCase("Icon", "Foreground", "Background")
+		records = append(records, record)
 	}
 	return records
 }
@@ -107,40 +116,98 @@ const (
 	LayerActors
 )
 
-type GameMap struct {
-	Dimensions   geometry.Point
-	Tiles        []int16
-	resolveTile  func(int16) NamedTile
-	SparseLayers map[Layer]PositionMap
+type CategoryObject struct {
+	Name     string
+	Category string
+	Meta     recfile.Record
 }
 
-func NewGameMap(dimensions geometry.Point, resolver func(idx int16) NamedTile) *GameMap {
-	return &GameMap{
-		Dimensions: dimensions,
-		Tiles:      make([]int16, dimensions.X*dimensions.Y),
-		SparseLayers: map[Layer]PositionMap{
-			LayerObjects: make(PositionMap),
-			LayerItems:   make(PositionMap),
-			LayerActors:  make(PositionMap),
-		},
-		resolveTile: resolver,
+func NewCategoryObject(record recfile.Record) CategoryObject {
+	return CategoryObject{
+		Name:     record.FindValueForKeyIgnoreCase("Name"),
+		Category: record.FindValueForKeyIgnoreCase("Category"),
+		Meta:     record.WithoutFieldsIgnoreCase("Name", "Category"),
 	}
 }
 
-func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile) (*GameMap, []NamedTile) {
+func (o CategoryObject) String() string {
+	head := fmt.Sprintf("Category: %s", o.Category)
+	if o.Name != "" {
+		head = fmt.Sprintf("Name: %s\nCategory: %s", o.Name, o.Category)
+	}
+	return fmt.Sprintf("%s\n%s", head, o.Meta.String())
+}
+
+func (o CategoryObject) ToRecord() recfile.Record {
+	record := recfile.Record{}
+	record = append(record, recfile.Field{Name: "Category", Value: o.Category})
+	if o.Name != "" {
+		record = append(record, recfile.Field{Name: "Name", Value: o.Name})
+	}
+	record = append(record, o.Meta...)
+	return record
+}
+
+func (o CategoryObject) NameOrCategory() string {
+	if o.Name != "" {
+		return o.Name
+	}
+	return o.Category
+}
+
+func (o CategoryObject) ToRecordWithPosition(pos geometry.Point) recfile.Record {
+	record := o.ToRecord()
+	return record.WithKeyValueIgnoreCase("Position", pos.Encode())
+}
+
+type CategoryPositionMap map[geometry.Point]CategoryObject
+
+func (m CategoryPositionMap) ToRecords() []recfile.Record {
+	records := make([]recfile.Record, 0, len(m))
+	for pos, obj := range m {
+		records = append(records, obj.ToRecordWithPosition(pos))
+	}
+	return records
+}
+
+type GameMap struct {
+	Dimensions    geometry.Point
+	Tiles         []int16
+	resolveTile   func(int16) NamedTile
+	resolveObject func(string) core.NamedColorChar
+	resolveItem   func(string) core.NamedColorChar
+	actors        IconPositionMap
+	objects       CategoryPositionMap
+	items         CategoryPositionMap
+}
+
+func NewGameMap(dimensions geometry.Point, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) *GameMap {
+	return &GameMap{
+		Dimensions:    dimensions,
+		Tiles:         make([]int16, dimensions.X*dimensions.Y),
+		resolveTile:   resolver,
+		resolveObject: objects,
+		resolveItem:   items,
+		actors:        make(IconPositionMap),
+		objects:       make(CategoryPositionMap),
+		items:         make(CategoryPositionMap),
+	}
+}
+
+func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) (*GameMap, []NamedTile) {
 	dimensions, tiles := textiles.ReadTileMap16(path.Join(mapDirectory, "tiles.bin"))
 	if len(tiles) == 0 {
 		return nil, nil
 	}
 	g := &GameMap{
-		Dimensions: dimensions,
-		Tiles:      tiles,
-		SparseLayers: map[Layer]PositionMap{
-			LayerObjects: make(PositionMap),
-			LayerItems:   make(PositionMap),
-			LayerActors:  make(PositionMap),
-		},
-		resolveTile: resolver,
+		Dimensions:    dimensions,
+		Tiles:         tiles,
+		actors:        make(IconPositionMap),
+		objects:       make(CategoryPositionMap),
+		items:         make(CategoryPositionMap),
+		resolveTile:   resolver,
+		resolveObject: objects,
+		resolveItem:   items,
 	}
 
 	tileSet := LoadTileSet(path.Join(mapDirectory, "tileset.rec"))
@@ -149,34 +216,34 @@ func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile) (*
 	itemRecords := recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "items.rec")))
 	actorRecords := recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "actors.rec")))
 
-	g.SparseLayers[LayerObjects] = make(PositionMap)
-	g.SparseLayers[LayerItems] = make(PositionMap)
-	g.SparseLayers[LayerActors] = make(PositionMap)
+	g.actors = make(IconPositionMap)
+	g.objects = make(CategoryPositionMap)
+	g.items = make(CategoryPositionMap)
 
 	for _, record := range objectRecords {
-		obj := textiles.NewIconRecord(record)
-		if posField, hasPos := obj.Meta.FindField("Position"); hasPos {
+		if posField, hasPos := record.FindField("Position"); hasPos {
 			pos, err := geometry.NewPointFromEncodedString(posField.Value)
 			if err == nil {
-				g.SparseLayers[LayerObjects][pos] = obj
+				obj := NewCategoryObject(record.WithoutFieldsIgnoreCase("Position"))
+				g.objects[pos] = obj
 			}
 		}
 	}
 	for _, record := range itemRecords {
-		obj := textiles.NewIconRecord(record)
-		if posField, hasPos := obj.Meta.FindField("Position"); hasPos {
+		if posField, hasPos := record.FindField("Position"); hasPos {
 			pos, err := geometry.NewPointFromEncodedString(posField.Value)
 			if err == nil {
-				g.SparseLayers[LayerItems][pos] = obj
+				obj := NewCategoryObject(record.WithoutFieldsIgnoreCase("Position"))
+				g.items[pos] = obj
 			}
 		}
 	}
 	for _, record := range actorRecords {
-		obj := textiles.NewIconRecord(record)
-		if posField, hasPos := obj.Meta.FindField("Position"); hasPos {
+		if posField, hasPos := record.FindField("Position"); hasPos {
 			pos, err := geometry.NewPointFromEncodedString(posField.Value)
+			obj := textiles.NewIconRecord(record.WithoutFieldsIgnoreCase("Position"))
 			if err == nil {
-				g.SparseLayers[LayerActors][pos] = obj
+				g.actors[pos] = obj
 			}
 		}
 	}
@@ -199,9 +266,9 @@ func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 		return err
 	}
 
-	objectRecords := g.SparseLayers[LayerObjects].ToRecords()
-	itemRecords := g.SparseLayers[LayerItems].ToRecords()
-	actorRecords := g.SparseLayers[LayerActors].ToRecords()
+	objectRecords := g.objects.ToRecords()
+	itemRecords := g.items.ToRecords()
+	actorRecords := g.actors.ToRecords()
 
 	err = recfile.Write(fxtools.MustCreate(path.Join(mapDirectory, "objects.rec")), objectRecords)
 	if err != nil {
@@ -223,62 +290,62 @@ func (g *GameMap) SetTile(pos geometry.Point, tile int16) {
 }
 
 func (g *GameMap) SetActor(pos geometry.Point, actor textiles.IconRecord) {
-	g.SparseLayers[LayerActors][pos] = actor
+	g.actors[pos] = actor
 }
 
-func (g *GameMap) SetObject(pos geometry.Point, object textiles.IconRecord) {
-	g.SparseLayers[LayerObjects][pos] = object
+func (g *GameMap) SetObject(pos geometry.Point, object CategoryObject) {
+	g.objects[pos] = object
 }
 
-func (g *GameMap) SetItem(pos geometry.Point, item textiles.IconRecord) {
-	g.SparseLayers[LayerItems][pos] = item
+func (g *GameMap) SetItem(pos geometry.Point, item CategoryObject) {
+	g.items[pos] = item
 }
 
 func (g *GameMap) RemoveActor(pos geometry.Point) {
-	delete(g.SparseLayers[LayerActors], pos)
+	delete(g.actors, pos)
 }
 
 func (g *GameMap) RemoveObject(pos geometry.Point) {
-	delete(g.SparseLayers[LayerObjects], pos)
+	delete(g.objects, pos)
 }
 
 func (g *GameMap) RemoveItem(pos geometry.Point) {
-	delete(g.SparseLayers[LayerItems], pos)
+	delete(g.items, pos)
 }
 
 func (g *GameMap) EditActorAt(app *cview.Application, panels *cview.Panels, pos geometry.Point) {
-	actor, exists := g.SparseLayers[LayerActors][pos]
+	actor, exists := g.actors[pos]
 	if !exists {
 		return
 	}
 
 	widgets.EditRecord(app, panels, actor.ToRecord(), func(record recfile.Record) {
 		obj := textiles.NewIconRecord(record)
-		g.SparseLayers[LayerActors][pos] = obj
+		g.actors[pos] = obj
 	})
 }
 
 func (g *GameMap) EditObjectAt(app *cview.Application, panels *cview.Panels, pos geometry.Point) {
-	object, exists := g.SparseLayers[LayerObjects][pos]
+	object, exists := g.objects[pos]
 	if !exists {
 		return
 	}
 
 	widgets.EditRecord(app, panels, object.ToRecord(), func(record recfile.Record) {
-		obj := textiles.NewIconRecord(record)
-		g.SparseLayers[LayerObjects][pos] = obj
+		obj := NewCategoryObject(record)
+		g.objects[pos] = obj
 	})
 }
 
 func (g *GameMap) EditItemAt(app *cview.Application, panels *cview.Panels, pos geometry.Point) {
-	item, exists := g.SparseLayers[LayerItems][pos]
+	item, exists := g.items[pos]
 	if !exists {
 		return
 	}
 
 	widgets.EditRecord(app, panels, item.ToRecord(), func(record recfile.Record) {
-		obj := textiles.NewIconRecord(record)
-		g.SparseLayers[LayerItems][pos] = obj
+		obj := NewCategoryObject(record)
+		g.items[pos] = obj
 	})
 }
 
@@ -289,18 +356,18 @@ func (g *GameMap) CharAt(pos geometry.Point) (core.NamedColorChar, bool) {
 	layerIconFound := false
 	layerIcon := core.NamedColorChar{}
 	// order of precedence: actor, item, object, tile
-	if actor, ok := g.SparseLayers[LayerActors][pos]; ok {
+	if actor, ok := g.actors[pos]; ok {
 		layerIcon = actor.Icon
 		layerIconFound = true
 	}
 
-	if item, ok := g.SparseLayers[LayerItems][pos]; ok {
-		layerIcon = item.Icon
+	if item, ok := g.items[pos]; ok {
+		layerIcon = g.resolveItem(item.Category)
 		layerIconFound = true
 	}
 
-	if object, ok := g.SparseLayers[LayerObjects][pos]; ok {
-		layerIcon = object.Icon
+	if object, ok := g.objects[pos]; ok {
+		layerIcon = g.resolveObject(object.NameOrCategory())
 		layerIconFound = true
 	}
 
@@ -320,13 +387,13 @@ func (g *GameMap) CharAt(pos geometry.Point) (core.NamedColorChar, bool) {
 
 func (g *GameMap) MapInfoAt(pos geometry.Point) []string {
 	var info []string
-	if actor, ok := g.SparseLayers[LayerActors][pos]; ok {
+	if actor, ok := g.actors[pos]; ok {
 		info = append(info, actor.String())
 	}
-	if item, ok := g.SparseLayers[LayerItems][pos]; ok {
+	if item, ok := g.items[pos]; ok {
 		info = append(info, item.String())
 	}
-	if object, ok := g.SparseLayers[LayerObjects][pos]; ok {
+	if object, ok := g.objects[pos]; ok {
 		info = append(info, object.String())
 	}
 	if tile := g.Tiles[pos.Y*g.Dimensions.X+pos.X]; g.resolveTile(tile).Name != "" {
@@ -355,16 +422,16 @@ func (g *GameMap) generateTileSet() ([]int16, []NamedTile) {
 }
 
 func (g *GameMap) IsActorAt(pos geometry.Point) bool {
-	_, ok := g.SparseLayers[LayerActors][pos]
+	_, ok := g.actors[pos]
 	return ok
 }
 
 func (g *GameMap) IsItemAt(pos geometry.Point) bool {
-	_, ok := g.SparseLayers[LayerItems][pos]
+	_, ok := g.items[pos]
 	return ok
 }
 
 func (g *GameMap) IsObjectAt(pos geometry.Point) bool {
-	_, ok := g.SparseLayers[LayerObjects][pos]
+	_, ok := g.objects[pos]
 	return ok
 }

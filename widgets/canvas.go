@@ -177,7 +177,14 @@ func (c *Canvas) resizeBuffer(size geometry.Point) {
 	c.screenBuffer = newBuffer
 	c.canvasSize = size
 }
+func (c *Canvas) Contains(point geometry.Point) bool {
+	return point.X >= 0 && point.Y >= 0 && point.X < c.canvasSize.X && point.Y < c.canvasSize.Y
+}
 func (c *Canvas) DefaultFillCondition(source, current, neighbor geometry.Point) bool {
+	if !c.Contains(neighbor) || !c.Contains(source) || !c.Contains(current) {
+		return false
+	}
+
 	sourceIndex := XYToIndex(source.X, source.Y, c.canvasSize.X)
 	destIndex := XYToIndex(neighbor.X, neighbor.Y, c.canvasSize.X)
 

@@ -4,7 +4,6 @@ import (
 	"TextPainter/mapeditor"
 	"TextPainter/widgets"
 	"bufio"
-	"encoding/gob"
 	"fmt"
 	"github.com/gdamore/tcell/v2"
 	"github.com/memmaker/go/core"
@@ -51,32 +50,45 @@ type TextPainter struct {
 
 	definedTiles []mapeditor.NamedTile
 
-	panels      *cview.Panels
-	iconPicker  *widgets.Picker
-	paletteBar  *widgets.Picker
-	charPicker  *widgets.Picker
-	drawLayer   *widgets.Canvas
-	iconMenuBar *widgets.ButtonBar
-	mapMenuBar  *widgets.ButtonBar
-	brushBar    *widgets.ButtonBar
-	isMapMode   bool
-	mapEditor   *mapeditor.MapEditor
-	tilePicker  *widgets.Picker
+	panels        *cview.Panels
+	iconPicker    *widgets.Picker
+	palettePicker *widgets.Picker
+	charPicker    *widgets.Picker
+	drawLayer     *widgets.Canvas
+	iconMenuBar   *widgets.ButtonBar
+	mapMenuBar    *widgets.ButtonBar
+	brushBar      *widgets.ButtonBar
+	isMapMode     bool
+	mapEditor     *mapeditor.MapEditor
+	tilePicker    *widgets.Picker
 
 	currentBrushHolder BrushHolder
 	logWindow          *cview.TextView
 	gameDataDirectory  string
 	actorRecords       []recfile.Record
-	itemRecords        []recfile.Record
-	actorPicker        *widgets.Picker
-	itemPicker         *widgets.Picker
-	objectPicker       *widgets.Picker
 
-	itemCategories      map[string]textiles.IconRecord
+	// itemTemplates have all the information to create an item.
+	// They don't have an icon defined and only include a "Category" field.
+	itemTemplates []recfile.Record
+
+	// objectTemplates are example records for the creation of an object.
+	// They don't have an icon defined and only include a "Name" field.
+	objectTemplates []recfile.Record
+
+	actorPicker  *widgets.Picker
+	itemPicker   *widgets.Picker
+	objectPicker *widgets.Picker
+
+	itemIcons map[string]core.NamedColorChar
+	// itemCategoryRecords Will map an ItemCategory to an Icon with Named Colors
+	// There fields are: Name, Icon, Foreground, Background (Opt), InventoryColor
 	itemCategoryRecords []recfile.Record
 
-	objectTypes       map[string]textiles.IconRecord
+	objectIcons map[string]core.NamedColorChar
+	// objectTypeRecords Will map an ObjectType to an Icon with Named Colors
+	// There fields are: Name, Icon, Foreground, Background (Opt), InventoryColor
 	objectTypeRecords []recfile.Record
+	currentMapName    string
 }
 
 func NewTextPainter(gameDataDir string, canvasSize geometry.Point) *TextPainter {
@@ -111,15 +123,16 @@ func (u *TextPainter) setupIconLayout() {
 
 	u.mainGrid.SetMinSize(1, 18)
 	u.mainGrid.SetColumns(u.canvasSize.X, 18, 18, -1)
-	u.mainGrid.SetRows(1, 1, u.canvasSize.Y, -1)
+	u.mainGrid.SetRows(1, 1, u.canvasSize.Y, 5, -1)
 
 	u.mainGrid.AddItem(u.iconMenuBar, 0, 0, 1, 4, 0, 0, false)
 	u.mainGrid.AddItem(u.brushBar, 1, 0, 1, 4, 0, 0, false)
 	u.mainGrid.AddItem(u.drawLayer, 2, 0, 1, 1, 0, 0, true)
 	u.mainGrid.AddItem(u.charPicker, 2, 1, 1, 1, 0, 0, false)
-	u.mainGrid.AddItem(u.paletteBar, 2, 2, 1, 1, 0, 0, false)
+	u.mainGrid.AddItem(u.palettePicker, 2, 2, 1, 1, 0, 0, false)
 	u.mainGrid.AddItem(u.iconPicker, 2, 3, 1, 1, 0, 0, false)
 	u.mainGrid.AddItem(u.colorPicker, 3, 0, 1, 4, 0, 0, false)
+	u.mainGrid.AddItem(u.logWindow, 4, 0, 1, 4, 0, 0, false)
 
 	u.currentBrushHolder = u.drawLayer
 	u.isMapMode = false
@@ -184,19 +197,28 @@ func (u *TextPainter) initMapModeUI() {
 		{
 			Label: "Save Map",
 			Action: func() {
-				u.askForString("Map Name?", "testmap", func(entered string) {
-					u.mapEditor.SaveMap(path.Join(u.gameDataDirectory, "maps", entered))
+				prefill := "testmap"
+				if u.currentMapName != "" {
+					prefill = u.currentMapName
+				}
+				u.askForString("Map Name?", prefill, func(entered string) {
+					mapDir := path.Join(u.gameDataDirectory, "maps", entered)
+					u.saveMap(mapDir)
+					u.currentMapName = entered
 				})
 			},
 		},
 		{
 			Label: "Load testmap",
 			Action: func() {
-				tiles := u.mapEditor.LoadMap(path.Join(u.gameDataDirectory, "maps", "testmap"), u.tileResolver)
-				if len(tiles) > 0 {
-					u.definedTiles = tiles
-					u.tilePicker.SetItems(pickerItemsFromTiles(u.definedTiles, u.palette))
+				prefill := "testmap"
+				if u.currentMapName != "" {
+					prefill = u.currentMapName
 				}
+				u.askForString("Map Name?", prefill, func(entered string) {
+					u.loadMap(path.Join(u.gameDataDirectory, "maps", entered))
+					u.currentMapName = entered
+				})
 			},
 		},
 		{
@@ -208,18 +230,12 @@ func (u *TextPainter) initMapModeUI() {
 	})
 	u.mapMenuBar = menuBar
 
-	// Log window
-	logWindow := cview.NewTextView()
-	logWindow.SetBorder(true)
-
-	u.logWindow = logWindow
-
 	// Map Viewer
-	mapEditor := mapeditor.NewMapEditor(u.palette, u.canvasSize, u.tileResolver, u.application, u.panels)
+	mapEditor := mapeditor.NewMapEditor(u.palette, u.canvasSize, u.application, u.panels, u.tileResolver, u.itemIconResolver, u.objectIconResolver)
 	mapEditor.SetBrush(fxtools.NewPencil())
 	mapEditor.SetHoverHandler(func(mapPos geometry.Point) {
 		mapInfo := u.mapEditor.GetMapInfoAt(mapPos)
-		logWindow.SetText(fmt.Sprintf("%s\n%s", mapPos.String(), strings.Join(mapInfo, "\n")))
+		u.logWindow.SetText(fmt.Sprintf("%s\n%s", mapPos.String(), strings.Join(mapInfo, "\n")))
 	})
 	u.mapEditor = mapEditor
 
@@ -315,31 +331,45 @@ func (u *TextPainter) initMapModeUI() {
 	itemPicker.SetListMode()
 	itemPicker.SetNoSecondaryIndicator()
 	itemPicker.SetModClickHandler(func(isRight bool, clickedIndex int, clickedItem widgets.PickerItem) {
-		if clickedIndex >= 0 && clickedIndex < len(u.itemRecords) {
-			record := u.itemRecords[clickedIndex]
-			u.editItemCategoryIcon(record.FindValueForKeyIgnoreCase("category"))
+		if clickedIndex >= 0 && clickedIndex < len(u.itemTemplates) {
+			record := u.itemTemplates[clickedIndex]
+			catName := record.FindValueForKeyIgnoreCase("category")
+			u.editItemCategoryIcon(catName)
 		}
 	})
 	itemPicker.SetChangeHandler(func(primaryIdx int, secondaryIdx int, primary widgets.PickerItem, secondary widgets.PickerItem) {
-		if primaryIdx >= 0 && primaryIdx < len(u.itemRecords) {
-			itemRecord := u.itemRecords[primaryIdx]
+		if primaryIdx >= 0 && primaryIdx < len(u.itemTemplates) {
+			itemRecord := u.itemTemplates[primaryIdx]
 			u.Print(itemRecord.String())
-			mapObject := textiles.NewIconRecord(itemRecord)
-			mapObject.Icon = u.catResolve(mapObject.Meta.FindValueForKeyIgnoreCase("category")).Icon
+			mapObject := mapeditor.NewCategoryObject(itemRecord)
 			u.mapEditor.SetItemDrawing(mapObject)
 		}
 	})
 	itemPicker.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		// capture Ctrl-S
 		if event.Key() == tcell.KeyCtrlS {
-			u.saveItemCategoryRecords()
+			u.saveIconsForItemsGlobally()
+			u.Print("Saved Item Icons")
 			return nil
 		}
 		return event
 	})
+
 	u.itemPicker = itemPicker
 
 	u.updateItemPicker()
+
+	// CURRENT PROBLEM
+	// The type of Object and the icon of the object is the same field.
+	// We want these two things to be independent of each other.
+	// They have to be two different fields
+
+	// ALSO
+	// For some Objects, we want them to just reference specific icons.
+	// While for other objects, we want them have unique icons.
+	// This is something each object decides for itself
+	// Containers, Signs -> Will always use the individually assigned icon
+	// Doors -> Will always use the pre-defined icons for DoorStates
 
 	objectPicker := widgets.NewPicker()
 	objectPicker.SetBorder(true)
@@ -348,35 +378,45 @@ func (u *TextPainter) initMapModeUI() {
 	objectPicker.SetListMode()
 	objectPicker.SetNoSecondaryIndicator()
 	objectPicker.SetModClickHandler(func(isRight bool, clickedIndex int, clickedItem widgets.PickerItem) {
-		if clickedIndex >= 0 && clickedIndex < len(u.objectTypeRecords) {
-			objectName := u.objectTypeRecords[clickedIndex].FindValueForKeyIgnoreCase("name")
+		if clickedIndex >= 0 && clickedIndex < len(u.objectTemplates) {
+			record := u.objectTemplates[clickedIndex]
+			objectName := record.FindValueForKeyIgnoreCase("category")
+			if nameField, exists := record.FindFieldIgnoreCase("name"); exists {
+				objectName = nameField.Value
+			}
 			u.editObjectTypeIcon(objectName)
 		}
 	})
 
 	objectPicker.SetChangeHandler(func(primaryIdx int, secondaryIdx int, primary widgets.PickerItem, secondary widgets.PickerItem) {
-		if primaryIdx >= 0 && primaryIdx < len(u.objectTypeRecords) {
-			objectRecord := u.objectTypeRecords[primaryIdx]
+		if primaryIdx >= 0 && primaryIdx < len(u.objectTemplates) {
+			objectRecord := u.objectTemplates[primaryIdx]
 			u.Print(objectRecord.String())
 			//objectRecord = append(objectRecord, recfile.Field{Name: "category", Value: objectRecord.FindValueForKeyIgnoreCase("name")})
-			mapObject := textiles.NewIconRecord(objectRecord)
-			mapObject.Icon = u.typeResolve(mapObject.Name).Icon
-
+			mapObject := mapeditor.NewCategoryObject(objectRecord)
 			u.mapEditor.SetObjectDrawing(mapObject)
 		}
 	})
 
-	objectPicker.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		// capture Ctrl-S
-		if event.Key() == tcell.KeyCtrlS {
-			u.saveObjectTypes()
-			return nil
-		}
-		return event
-	})
-
 	u.objectPicker = objectPicker
 
+	u.updateObjectPicker()
+}
+
+func (u *TextPainter) saveMap(mapDir string) {
+	u.mapEditor.SaveMap(mapDir)
+	u.saveIconsForObjects(path.Join(mapDir, "iconsForObjects.rec"))
+}
+
+func (u *TextPainter) loadMap(mapDirectory string) {
+	tiles := u.mapEditor.LoadMap(mapDirectory, u.tileResolver, u.itemIconResolver, u.objectIconResolver)
+	if len(tiles) > 0 {
+		u.definedTiles = tiles
+		u.tilePicker.SetItems(pickerItemsFromTiles(u.definedTiles, u.palette))
+	}
+	u.loadIconsForObjects(path.Join(mapDirectory, "iconsForObjects.rec"))
+
+	u.updateItemPicker()
 	u.updateObjectPicker()
 }
 
@@ -428,6 +468,12 @@ func (u *TextPainter) initCoreUI() {
 	u.application.SetRoot(u.panels, true)
 	u.application.SetFocus(u.panels)
 
+	// Log window
+	logWindow := cview.NewTextView()
+	logWindow.SetBorder(true)
+
+	u.logWindow = logWindow
+
 	u.initIconUI()
 	u.initMapModeUI()
 
@@ -454,10 +500,8 @@ func (u *TextPainter) initIconUI() {
 			Action: u.toggleMapMode,
 		},
 		{
-			Label: "Save Icons",
-			Action: func() {
-				u.saveIcons()
-			},
+			Label:  "Save Icons",
+			Action: u.saveIcons,
 		},
 		{
 			Label: "Save & Quit",
@@ -482,22 +526,26 @@ func (u *TextPainter) initIconUI() {
 
 	u.charPicker = charPicker
 
-	paletteBar := widgets.NewPalettePicker()
-	paletteBar.SetTitle("Colors")
-	paletteBar.SetPalette(u.palette)
-	paletteBar.SetBorder(true)
-	paletteBar.SetPrimarySelectedIndex(0)
-	paletteBar.SetSecondarySelectedIndex(1)
+	palettePicker := widgets.NewPalettePicker()
+	palettePicker.SetTitle("Colors")
+	palettePicker.SetPalette(u.palette)
+	palettePicker.SetBorder(true)
+	palettePicker.SetPrimarySelectedIndex(0)
+	palettePicker.SetSecondarySelectedIndex(1)
 
-	paletteBar.SetChangeHandler(func(primaryIdx int, secondaryIdx int, primary widgets.PickerItem, secondary widgets.PickerItem) {
+	palettePicker.SetChangeHandler(func(primaryIdx int, secondaryIdx int, primary widgets.PickerItem, secondary widgets.PickerItem) {
 		if u.palette.IsValidIndex(primaryIdx) {
-			u.drawLayer.SetCharFg(u.palette.GetNamedColorByIndex(primaryIdx).Name)
+			colorName := u.palette.GetNamedColorByIndex(primaryIdx).Name
+			u.drawLayer.SetCharFg(colorName)
+			u.logWindow.SetText(fmt.Sprintf("Primary: %s", colorName))
 		}
 		if u.palette.IsValidIndex(secondaryIdx) {
-			u.drawLayer.SetCharBg(u.palette.GetNamedColorByIndex(secondaryIdx).Name)
+			colorName := u.palette.GetNamedColorByIndex(secondaryIdx).Name
+			u.drawLayer.SetCharBg(colorName)
+			u.logWindow.SetText(fmt.Sprintf("Secondary: %s", colorName))
 		}
 	})
-	paletteBar.SetModClickHandler(func(isRight bool, clickedIndex int, clickedItem widgets.PickerItem) {
+	palettePicker.SetModClickHandler(func(isRight bool, clickedIndex int, clickedItem widgets.PickerItem) {
 		if isRight {
 			u.editColorName(clickedIndex)
 		} else {
@@ -505,7 +553,7 @@ func (u *TextPainter) initIconUI() {
 			u.colorPicker.SetColor(u.palette.GetByIndex(clickedIndex))
 		}
 	})
-	u.paletteBar = paletteBar
+	u.palettePicker = palettePicker
 
 	iconPicker := widgets.NewPicker()
 	iconPicker.SetTitle("Icons")
@@ -522,8 +570,8 @@ func (u *TextPainter) initIconUI() {
 		if primaryIdx >= 0 && primaryIdx < len(u.icons) {
 			selectedIcon := u.icons[primaryIdx]
 			u.drawLayer.SetChar(selectedIcon)
-			u.paletteBar.SetPrimarySelectedIndex(u.palette.GetColorIndex(selectedIcon.Fg))
-			u.paletteBar.SetSecondarySelectedIndex(u.palette.GetColorIndex(selectedIcon.Bg))
+			u.palettePicker.SetPrimarySelectedIndex(u.palette.GetColorIndex(selectedIcon.Fg))
+			u.palettePicker.SetSecondarySelectedIndex(u.palette.GetColorIndex(selectedIcon.Bg))
 			u.charPicker.SetPrimarySelectedIndex(int(fxtools.UnicodeToCP437Byte(selectedIcon.Char)))
 		}
 		if secondaryIdx >= 0 && secondaryIdx < len(u.icons) {
@@ -634,7 +682,7 @@ func (u *TextPainter) editColorName(index int) {
 		if newName, exists := values["name"]; exists && newName.AsString() != oldName {
 			u.palette = u.palette.WithColorRenamed(oldName, newName.AsString())
 		}
-		u.paletteBar.SetPalette(u.palette)
+		u.palettePicker.SetPalette(u.palette)
 		u.drawLayer.SetPalette(u.palette)
 	})
 }
@@ -785,8 +833,8 @@ func (u *TextPainter) pickRune(selection []geometry.Point) {
 		charOnCanvas := u.drawLayer.GetCharAt(samplePoint)
 		u.drawLayer.SetChar(charOnCanvas)
 		u.drawLayer.SetDrawMode()
-		u.paletteBar.SetPrimarySelectedIndex(u.palette.GetColorIndex(charOnCanvas.Fg))
-		u.paletteBar.SetSecondarySelectedIndex(u.palette.GetColorIndex(charOnCanvas.Bg))
+		u.palettePicker.SetPrimarySelectedIndex(u.palette.GetColorIndex(charOnCanvas.Fg))
+		u.palettePicker.SetSecondarySelectedIndex(u.palette.GetColorIndex(charOnCanvas.Bg))
 		u.charPicker.SetPrimarySelectedIndex(int(fxtools.UnicodeToCP437Byte(charOnCanvas.Char)))
 	}
 }
@@ -805,7 +853,7 @@ func (u *TextPainter) onColorChanged(rgba color.RGBA) {
 	index := u.currentlyEditedColorIndex
 	if u.palette.IsValidIndex(index) {
 		u.palette = u.palette.WithColorChanged(index, rgba)
-		u.paletteBar.SetPalette(u.palette)
+		u.palettePicker.SetPalette(u.palette)
 		u.drawLayer.SetPalette(u.palette)
 	}
 }
@@ -819,23 +867,23 @@ func (u *TextPainter) savePalette() {
 
 func (u *TextPainter) saveIcons() {
 	// use gob to write icons
-	iconFile := fxtools.MustCreate(path.Join(u.gameDataDirectory, "definitions", "icons.gob"))
+	iconFile := fxtools.MustCreate(path.Join(u.gameDataDirectory, "definitions", "icons.rec"))
 	defer iconFile.Close()
-	gw := gob.NewEncoder(iconFile)
-	err := gw.Encode(u.icons)
-	if err != nil {
-		log.Fatal(err)
+	records := make([]recfile.Record, len(u.icons))
+	for i, icon := range u.icons {
+		records[i] = namedColorCharToRecord(icon)
 	}
+	recfile.Write(iconFile, records)
 }
 
 func (u *TextPainter) tryLoadIcons() {
-	file, openErr := os.Open(path.Join(u.gameDataDirectory, "definitions", "icons.gob"))
-	if openErr == nil {
-		defer file.Close()
+	iconFile := fxtools.MustOpen(path.Join(u.gameDataDirectory, "definitions", "icons.rec"))
+	defer iconFile.Close()
+	records := recfile.Read(iconFile)
+	decodedIcons := make([]core.NamedColorChar, len(records))
+	for i, record := range records {
+		decodedIcons[i] = recordToNamedColorChar(record)
 	}
-	var decodedIcons []core.NamedColorChar
-	gr := gob.NewDecoder(file)
-	gr.Decode(&decodedIcons)
 	u.icons = decodedIcons
 }
 
@@ -915,27 +963,14 @@ func (u *TextPainter) init() {
 }
 
 func (u *TextPainter) loadGameData() {
-	objectTypesFilePath := path.Join(u.gameDataDirectory, "definitions", "iconsForObjects.rec")
-	itemCategoriesFilePath := path.Join(u.gameDataDirectory, "definitions", "iconsForItems.rec")
-
-	itemCats := fxtools.MustOpen(itemCategoriesFilePath)
-	defer itemCats.Close()
-	u.itemCategories = ReadIconRecordsIntoLowerCaseMap(itemCats)
-
-	itemCats.Seek(0, 0)
-	u.itemCategoryRecords = recfile.Read(itemCats)
-
-	objTypes := fxtools.MustOpen(objectTypesFilePath)
-	defer objTypes.Close()
-
-	u.objectTypes = ReadIconRecordsIntoLowerCaseMap(objTypes)
-	objTypes.Seek(0, 0)
-	u.objectTypeRecords = recfile.Read(objTypes)
+	u.loadIconsForItems(path.Join(u.gameDataDirectory, "definitions", "iconsForItems.rec"))
+	u.loadIconsForObjects(path.Join(u.gameDataDirectory, "definitions", "iconsForObjects.rec"))
 
 	filePath := path.Join(u.gameDataDirectory, "definitions")
 
 	actorFilePath := path.Join(filePath, "actors.rec")
 	weaponsFilePath := path.Join(filePath, "weapons.rec")
+	ammoFilePath := path.Join(filePath, "ammo.rec")
 	armorFilePath := path.Join(filePath, "armor.rec")
 	foodFilePath := path.Join(filePath, "food.rec")
 	miscFilePath := path.Join(filePath, "miscItems.rec")
@@ -947,6 +982,10 @@ func (u *TextPainter) loadGameData() {
 	weapons := fxtools.MustOpen(weaponsFilePath)
 	defer weapons.Close()
 	weaponRecords := recfile.Read(weapons)
+
+	ammo := fxtools.MustOpen(ammoFilePath)
+	defer ammo.Close()
+	ammoRecords := recfile.Read(ammo)
 
 	armors := fxtools.MustOpen(armorFilePath)
 	defer armors.Close()
@@ -960,15 +999,58 @@ func (u *TextPainter) loadGameData() {
 	defer misc.Close()
 	miscRecords := recfile.Read(misc)
 
-	itemRecords := append(weaponRecords, armorRecords...)
+	itemRecords := append(weaponRecords, ammoRecords...)
+	itemRecords = append(itemRecords, armorRecords...)
 	itemRecords = append(itemRecords, foodRecords...)
 	itemRecords = append(itemRecords, miscRecords...)
-	u.itemRecords = itemRecords
+
+	u.itemTemplates = itemRecords
+	u.objectTemplates = recfile.Read(fxtools.MustOpen(path.Join(filePath, "objectTemplates.rec")))
 
 	u.updateActorPicker()
 	u.updateItemPicker()
 	u.updateObjectPicker()
 
+}
+
+func (u *TextPainter) loadIconsForObjects(objectTypesFilePath string) {
+	objTypes, opErr := os.Open(objectTypesFilePath)
+	if opErr != nil {
+		return
+	}
+	defer objTypes.Close()
+
+	u.objectIcons = mapToColoredChar(ReadIconRecordsIntoLowerCaseMap(objTypes))
+	objTypes.Seek(0, 0)
+	u.objectTypeRecords = recfile.Read(objTypes)
+}
+func OpenOrEmpty(filename string) *os.File {
+	open, err := os.Open(filename)
+	if err != nil { // return fake file
+		return &os.File{}
+	}
+	return open
+}
+func (u *TextPainter) loadIconsForItems(itemCategoriesFilePath string) {
+
+	itemCats, opErr := os.Open(itemCategoriesFilePath)
+	if opErr != nil {
+		return
+	}
+
+	defer itemCats.Close()
+	u.itemIcons = mapToColoredChar(ReadIconRecordsIntoLowerCaseMap(itemCats))
+
+	itemCats.Seek(0, 0)
+	u.itemCategoryRecords = recfile.Read(itemCats)
+}
+
+func mapToColoredChar(caseMap map[string]textiles.IconRecord) map[string]core.NamedColorChar {
+	result := make(map[string]core.NamedColorChar)
+	for k, v := range caseMap {
+		result[k] = v.Icon
+	}
+	return result
 }
 
 func (u *TextPainter) updateActorPicker() {
@@ -982,33 +1064,33 @@ func (u *TextPainter) updateActorPicker() {
 	}
 	u.actorPicker.SetItems(pickerItems)
 }
-func (u *TextPainter) typeResolve(objectType string) textiles.IconRecord {
-	if resolved, exists := u.objectTypes[strings.ToLower(objectType)]; exists {
+func (u *TextPainter) objectIconResolver(objectType string) core.NamedColorChar {
+	if resolved, exists := u.objectIcons[strings.ToLower(objectType)]; exists {
 		return resolved
 	}
-	return textiles.IconRecord{}
+	return core.NamedColorChar{}
 }
 
-func (u *TextPainter) catResolve(cat string) textiles.IconRecord {
-	if category, exists := u.itemCategories[strings.ToLower(cat)]; exists {
+func (u *TextPainter) itemIconResolver(cat string) core.NamedColorChar {
+	if category, exists := u.itemIcons[strings.ToLower(cat)]; exists {
 		return category
 	}
-	return textiles.IconRecord{}
+	return core.NamedColorChar{}
 }
 func (u *TextPainter) updateItemPicker() {
-	if len(u.itemCategories) == 0 {
+	if len(u.itemIcons) == 0 {
 		return
 	}
 
-	pickerItems := make([]widgets.PickerItem, len(u.itemRecords))
-	for i, record := range u.itemRecords {
+	pickerItems := make([]widgets.PickerItem, len(u.itemTemplates))
+	for i, record := range u.itemTemplates {
 		itemCategory := record.FindValueForKeyIgnoreCase("category")
-		category := u.catResolve(itemCategory)
+		category := u.itemIconResolver(itemCategory)
 		itemName := record.FindValueForKeyIgnoreCase("name")
 		pickerItems[i] = widgets.PickerItem{
 			Name:      itemName,
-			Icon:      category.Icon.Char,
-			IconStyle: GetStyleForNamedChar(category.Icon, u.palette),
+			Icon:      category.Char,
+			IconStyle: GetStyleForNamedChar(category, u.palette),
 		}
 	}
 	u.itemPicker.SetItems(pickerItems)
@@ -1016,10 +1098,12 @@ func (u *TextPainter) updateItemPicker() {
 
 func (u *TextPainter) updateObjectPicker() {
 	pickerItems := make([]widgets.PickerItem, 0)
-
-	for _, record := range u.objectTypeRecords {
-		objectName := record.FindValueForKeyIgnoreCase("name")
-		typeIcon := u.typeResolve(objectName).Icon
+	for _, record := range u.objectTemplates {
+		objectName := record.FindValueForKeyIgnoreCase("category")
+		if field, exists := record.FindFieldIgnoreCase("name"); exists {
+			objectName = field.Value
+		}
+		typeIcon := u.objectIconResolver(objectName)
 		pickerItems = append(pickerItems, widgets.PickerItem{
 			Name:      objectName,
 			Icon:      typeIcon.Char,
@@ -1058,17 +1142,28 @@ func (u *TextPainter) editActorRecord(idx int) {
 }
 
 func (u *TextPainter) editItemCategoryIcon(catName string) {
-	cat := u.catResolve(catName)
 	widgets.OpenModalPicker(u.application, u.panels, pickerItemsFromIcons(u.icons, u.palette), func(selectedIndex int) {
-		u.itemCategories[strings.ToLower(catName)] = cat.WithIcon(u.icons[selectedIndex])
+		u.itemIcons[strings.ToLower(catName)] = u.icons[selectedIndex]
 		u.updateItemPicker()
 	})
 }
 
 func (u *TextPainter) editObjectTypeIcon(objectName string) {
-	object := u.typeResolve(objectName)
 	widgets.OpenModalPicker(u.application, u.panels, pickerItemsFromIcons(u.icons, u.palette), func(selectedIndex int) {
-		u.objectTypes[strings.ToLower(objectName)] = object.WithIcon(u.icons[selectedIndex])
+		key := strings.ToLower(objectName)
+		selectedIcon := u.icons[selectedIndex]
+		if _, exists := u.objectIcons[key]; !exists {
+			newEntry := recfile.Record{
+				recfile.Field{Name: "Name", Value: objectName},
+				recfile.Field{Name: "Icon", Value: string(selectedIcon.Char)},
+				recfile.Field{Name: "Foreground", Value: selectedIcon.Fg},
+			}
+			if selectedIcon.HasBackground() {
+				newEntry = append(newEntry, recfile.Field{Name: "Background", Value: selectedIcon.Bg})
+			}
+			u.objectTypeRecords = append(u.objectTypeRecords, newEntry)
+		}
+		u.objectIcons[key] = selectedIcon
 		u.updateObjectPicker()
 	})
 }
@@ -1088,36 +1183,47 @@ func (u *TextPainter) saveActorRecords() {
 	u.Print("Saved actors")
 }
 
-func (u *TextPainter) saveItemCategoryRecords() {
+func (u *TextPainter) saveIconsForItemsGlobally() {
 	itemCategoriesFilePath := path.Join(u.gameDataDirectory, "definitions", "iconsForItems.rec")
+	u.saveIconsForItems(itemCategoriesFilePath)
+}
+
+func (u *TextPainter) saveIconsForItems(itemCategoriesFilePath string) {
 	itemCats := fxtools.MustCreate(itemCategoriesFilePath)
 	defer itemCats.Close()
 	records := u.itemCategoryRecords
+
 	for i, cat := range records {
-		catName := cat.FindValueForKeyIgnoreCase("category")
-		icon := u.catResolve(catName).Icon
+		catName := cat.FindValueForKeyIgnoreCase("Name")
+		icon := u.itemIconResolver(catName)
 		records[i] = recfile.Record{
 			recfile.Field{Name: "Name", Value: catName},
 			recfile.Field{Name: "Icon", Value: string(icon.Char)},
 			recfile.Field{Name: "Foreground", Value: icon.Fg},
+			recfile.Field{Name: "InventoryColor", Value: cat.FindValueForKeyIgnoreCase("InventoryColor")},
 		}
 		if icon.HasBackground() {
 			records[i] = append(records[i], recfile.Field{Name: "Background", Value: icon.Bg})
 		}
 	}
+
 	recfile.Write(itemCats, records)
 	u.Print("Saved item categories")
 }
 
-func (u *TextPainter) saveObjectTypes() {
+func (u *TextPainter) saveIconsForObjectsGlobally() {
 	objectTypesFilePath := path.Join(u.gameDataDirectory, "definitions", "iconsForObjects.rec")
+	u.saveIconsForObjects(objectTypesFilePath)
+}
+
+func (u *TextPainter) saveIconsForObjects(objectTypesFilePath string) {
 	objectTypes := fxtools.MustCreate(objectTypesFilePath)
 	defer objectTypes.Close()
 	records := u.objectTypeRecords
+
 	for i, obj := range records {
-		objNameField, _ := obj.FindField("Name")
-		objName := objNameField.Value
-		icon := u.typeResolve(objName).Icon
+		objName := obj.FindValueForKeyIgnoreCase("name")
+		icon := u.objectIconResolver(objName)
 		records[i] = recfile.Record{
 			recfile.Field{Name: "Name", Value: objName},
 			recfile.Field{Name: "Icon", Value: string(icon.Char)},
@@ -1127,6 +1233,7 @@ func (u *TextPainter) saveObjectTypes() {
 			records[i] = append(records[i], recfile.Field{Name: "Background", Value: icon.Bg})
 		}
 	}
+
 	recfile.Write(objectTypes, records)
 	u.Print("Saved object types")
 }
@@ -1172,4 +1279,35 @@ func ReadIconRecordsIntoLowerCaseMap(reader io.Reader) map[string]textiles.IconR
 		categories[strings.ToLower(category.Name)] = category
 	}
 	return categories
+}
+func namedColorCharToRecord(c core.NamedColorChar) recfile.Record {
+	return recfile.Record{
+		recfile.Field{
+			Name:  "Char",
+			Value: string(c.Char),
+		},
+		recfile.Field{
+			Name:  "Fg",
+			Value: c.Fg,
+		},
+		recfile.Field{
+			Name:  "Bg",
+			Value: c.Bg,
+		},
+	}
+}
+
+func recordToNamedColorChar(record recfile.Record) core.NamedColorChar {
+	var char core.NamedColorChar
+	for _, field := range record {
+		switch strings.ToLower(field.Name) {
+		case "char":
+			char.Char = field.AsRune()
+		case "fg":
+			char.Fg = field.Value
+		case "bg":
+			char.Bg = field.Value
+		}
+	}
+	return char
 }

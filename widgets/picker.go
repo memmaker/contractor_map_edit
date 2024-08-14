@@ -1,9 +1,9 @@
 package widgets
 
 import (
-	"github.com/memmaker/go/cview"
 	"fmt"
 	"github.com/gdamore/tcell/v2"
+	"github.com/memmaker/go/cview"
 	"github.com/memmaker/go/fxtools"
 	"github.com/memmaker/go/textiles"
 	"math"
@@ -42,10 +42,12 @@ type Picker struct {
 	lastHoverIndex             int
 
 	currentPage int
+	isModal     bool
 }
 
 func OpenModalPicker(app *cview.Application, panels *cview.Panels, elements []PickerItem, onSelected func(selectedIndex int)) *Picker {
 	modal := NewPicker()
+	modal.SetModal(true)
 	modal.SetBorder(true)
 	w, h := 18, 18
 	screenW, screenH := app.GetScreen().Size()
@@ -55,6 +57,7 @@ func OpenModalPicker(app *cview.Application, panels *cview.Panels, elements []Pi
 	closePicker := func() {
 		panels.RemovePanel("modal")
 		_, frontPanel := panels.GetFrontPanel()
+		app.SetBeforeFocusFunc(nil)
 		app.SetFocus(frontPanel)
 	}
 	modal.SetItems(elements)
@@ -64,8 +67,15 @@ func OpenModalPicker(app *cview.Application, panels *cview.Panels, elements []Pi
 			onSelected(primaryIndex)
 		}
 	})
+	modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			closePicker()
+		}
+		return event
+	})
 	panels.AddPanel("modal", modal, false, true)
 	app.SetFocus(modal)
+	app.SetBeforeFocusFunc(func(p cview.Primitive) bool { return false })
 	return modal
 }
 
@@ -320,6 +330,9 @@ func (p *Picker) handleMouse(action cview.MouseAction, event *tcell.EventMouse) 
 	if isLeftClick {
 		p.primarySelected = hoverIndex
 		p.selectionChanged(hoverIndex, -1)
+		if p.isModal {
+			return 0, nil
+		}
 		return cview.MouseLeftClick, event
 	} else if isRightClick {
 		p.secondarySelected = hoverIndex
@@ -385,4 +398,8 @@ func (p *Picker) absoluteIndexToPageIndex(i int) int {
 
 func (p *Picker) relativePageIndexToAbsoluteIndex(index int) int {
 	return index + p.firstItemIndexForPage(p.currentPage)
+}
+
+func (p *Picker) SetModal(value bool) {
+	p.isModal = value
 }

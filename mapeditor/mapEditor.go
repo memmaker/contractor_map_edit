@@ -42,12 +42,14 @@ func (m *MapEditor) SetDrawMode() {
 func NewMapEditor(
 	palette textiles.ColorPalette,
 	dimensions geometry.Point,
-	tileResolver func(idx int16) NamedTile,
 	app *cview.Application,
 	panels *cview.Panels,
+	tileResolver func(idx int16) NamedTile,
+	items func(cat string) core.NamedColorChar,
+	objects func(objectType string) core.NamedColorChar,
 ) *MapEditor {
 	b := cview.NewBox()
-	gameMap := NewGameMap(dimensions, tileResolver)
+	gameMap := NewGameMap(dimensions, tileResolver, items, objects)
 	m := &MapEditor{
 		Box:     b,
 		palette: palette,
@@ -121,6 +123,9 @@ func (m *MapEditor) renderMapPosition(mapPos geometry.Point, style tcell.Style) 
 }
 
 func (m *MapEditor) handleMouse(action cview.MouseAction, event *tcell.EventMouse) (cview.MouseAction, *tcell.EventMouse) {
+	if !m.HasFocus() {
+		return cview.MouseLeftClick, event
+	}
 	if event != nil {
 		newX, newY := event.Position()
 		xOff, yOff, _, _ := m.GetInnerRect()
@@ -185,28 +190,12 @@ func (m *MapEditor) onMouseLeftUp(mouse geometry.Point) {
 	}
 }
 
-func (m *MapEditor) SetTile(point geometry.Point, t int16) {
-	m.gameMap.SetTile(point, t)
-}
-
-func (m *MapEditor) SetActor(point geometry.Point, actor textiles.IconRecord) {
-	m.gameMap.SetActor(point, actor)
-}
-
-func (m *MapEditor) SetItem(point geometry.Point, item textiles.IconRecord) {
-	m.gameMap.SetItem(point, item)
-}
-
-func (m *MapEditor) SetObject(point geometry.Point, object textiles.IconRecord) {
-	m.gameMap.SetObject(point, object)
-}
-
 func (m *MapEditor) SaveMap(mapDirectory string) error {
 	return m.gameMap.SaveMapToDisk(mapDirectory)
 }
 
-func (m *MapEditor) LoadMap(mapDirectory string, resolver func(idx int16) NamedTile) []NamedTile {
-	gameMap, tileset := LoadMapFromDisk(mapDirectory, resolver)
+func (m *MapEditor) LoadMap(mapDirectory string, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) []NamedTile {
+	gameMap, tileset := LoadMapFromDisk(mapDirectory, resolver, items, objects)
 	if gameMap == nil {
 		return nil
 	}
@@ -238,7 +227,7 @@ func (m *MapEditor) SetActorDrawing(actor textiles.IconRecord) {
 	}
 }
 
-func (m *MapEditor) SetItemDrawing(item textiles.IconRecord) {
+func (m *MapEditor) SetItemDrawing(item CategoryObject) {
 	m.currentSelectionHandler = func(points []geometry.Point) {
 		for _, point := range points {
 			m.gameMap.SetItem(point, item)
@@ -246,7 +235,7 @@ func (m *MapEditor) SetItemDrawing(item textiles.IconRecord) {
 	}
 }
 
-func (m *MapEditor) SetObjectDrawing(object textiles.IconRecord) {
+func (m *MapEditor) SetObjectDrawing(object CategoryObject) {
 	m.currentSelectionHandler = func(points []geometry.Point) {
 		for _, point := range points {
 			m.gameMap.SetObject(point, object)

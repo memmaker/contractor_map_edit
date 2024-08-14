@@ -99,6 +99,7 @@ func OpenModalEditor(app *cview.Application, panels *cview.Panels, preFill strin
 	closeModal := func() {
 		panels.RemovePanel("modal")
 		_, frontPanel := panels.GetFrontPanel()
+		app.SetBeforeFocusFunc(nil)
 		app.SetFocus(frontPanel)
 	}
 
@@ -127,16 +128,31 @@ func OpenModalEditor(app *cview.Application, panels *cview.Panels, preFill strin
 
 	panels.AddPanel("modal", modal, false, true)
 	app.SetFocus(modal)
+	app.SetBeforeFocusFunc(func(p cview.Primitive) bool { return false })
 }
 
 func OpenModalForm(app *cview.Application, panels *cview.Panels, elements []FormElementDescription, confirm func(map[string]TypedString)) {
 	modal := NewModalForm(elements, confirm, func() {
 		panels.RemovePanel("modal")
 		_, frontPanel := panels.GetFrontPanel()
+		// Reset focus changes
+		app.SetBeforeFocusFunc(nil)
 		app.SetFocus(frontPanel)
 	})
 	panels.AddPanel("modal", modal, false, true)
 	app.SetFocus(modal)
+
+	// deny any focus change
+	app.SetBeforeFocusFunc(func(p cview.Primitive) bool {
+		if p == modal {
+			return true
+		}
+		x, y, w, h := p.GetRect()
+		if modal.InRect(x, y) && modal.InRect(x+w, y+h) {
+			return true
+		}
+		return false
+	})
 }
 
 func NewModalForm(elements []FormElementDescription, confirm func(map[string]TypedString), close func()) *cview.Modal {
