@@ -47,6 +47,16 @@ github.com/memmaker/go v0.0.0-20240810220333-84f986a5aef5 h1:+1JNhaj0sRiYTGsT8Y6
 github.com/memmaker/go v0.0.0-20240810220333-84f986a5aef5/go.mod h1:JMeTLLsv3ZU0fdEU0Qf3qvFzMbNhFlfgHgAlgTNyass=
 github.com/memmaker/go v0.0.0-20240812132939-c82d9069777e h1:13nzDxaj4ANt5BBoJ0uw8t0GXmFOZ0b/yoA7IwLatnQ=
 github.com/memmaker/go v0.0.0-20240812132939-c82d9069777e/go.mod h1:JMeTLLsv3ZU0fdEU0Qf3qvFzMbNhFlfgHgAlgTNyass=
+github.com/memmaker/go v0.0.0-20240827223635-6307c11cd1c5 h1:cOeIikWSibMSSaTgPa0un8krI5SgCE2SalXoDreyVfY=
+github.com/memmaker/go v0.0.0-20240827223635-6307c11cd1c5/go.mod h1:EfQr4g4zth0UrPvz9kn0zBfeShWCAUDdK01pd3GioRo=
+github.com/memmaker/go v0.0.0-20240827223828-4f7ae37a60d9 h1:3HZ1sBjP2tiji6gPdXY41IqWb2mVfTDeGZr1ZRu8quk=
+github.com/memmaker/go v0.0.0-20240827223828-4f7ae37a60d9/go.mod h1:EfQr4g4zth0UrPvz9kn0zBfeShWCAUDdK01pd3GioRo=
+github.com/memmaker/go v0.0.0-20240827223940-bea2d207c055 h1:rXnLbi8OZ0Fs4WC2dc/F3t8TQRe8/DtAF8EMEvvPObQ=
+github.com/memmaker/go v0.0.0-20240827223940-bea2d207c055/go.mod h1:EfQr4g4zth0UrPvz9kn0zBfeShWCAUDdK01pd3GioRo=
+github.com/memmaker/go v0.0.0-20240827224219-b2e01bae812b h1:26Y+x44JYe71/Fb1O2gyLSDYDkUoQ+rnxfz+hPhMK/Y=
+github.com/memmaker/go v0.0.0-20240827224219-b2e01bae812b/go.mod h1:EfQr4g4zth0UrPvz9kn0zBfeShWCAUDdK01pd3GioRo=
+github.com/memmaker/go v0.0.0-20240904090407-087b3c806b3e h1:nRq+l5bFMByGDovRlLi6i8DcKmqAig5O935IKzan4DI=
+github.com/memmaker/go v0.0.0-20240904090407-087b3c806b3e/go.mod h1:EfQr4g4zth0UrPvz9kn0zBfeShWCAUDdK01pd3GioRo=
 github.com/rivo/uniseg v0.1.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
 github.com/rivo/uniseg v0.2.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
 github.com/rivo/uniseg v0.4.3/go.mod h1:FN3SvrM+Zdj16jyLfmOkMNblXMcoc8DfTHruCPUcx88=

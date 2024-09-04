@@ -1,7 +1,6 @@
 package mapeditor
 
 import (
-	"TextPainter/widgets"
 	"fmt"
 	"github.com/memmaker/go/core"
 	"github.com/memmaker/go/cview"
@@ -160,6 +159,16 @@ func (o CategoryObject) ToRecordWithPosition(pos geometry.Point) recfile.Record 
 	return record.WithKeyValueIgnoreCase("Position", pos.Encode())
 }
 
+func (o CategoryObject) Copy() CategoryObject {
+	newMeta := make(recfile.Record, len(o.Meta))
+	copy(newMeta, o.Meta)
+	return CategoryObject{
+		Name:     o.Name,
+		Category: o.Category,
+		Meta:     newMeta,
+	}
+}
+
 type CategoryPositionMap map[geometry.Point]CategoryObject
 
 func (m CategoryPositionMap) ToRecords() []recfile.Record {
@@ -170,27 +179,106 @@ func (m CategoryPositionMap) ToRecords() []recfile.Record {
 	return records
 }
 
-type GameMap struct {
-	Dimensions    geometry.Point
-	Tiles         []int16
+type MapArea struct {
+	Dimensions geometry.Point
+	Tiles      []int16
+	actors     IconPositionMap
+	objects    CategoryPositionMap
+	items      CategoryPositionMap
+
 	resolveTile   func(int16) NamedTile
 	resolveObject func(string) core.NamedColorChar
 	resolveItem   func(string) core.NamedColorChar
-	actors        IconPositionMap
-	objects       CategoryPositionMap
-	items         CategoryPositionMap
+}
+
+func (m *MapArea) CharAt(pos geometry.Point) (core.NamedColorChar, bool) {
+	if pos.X < 0 || pos.X >= m.Dimensions.X || pos.Y < 0 || pos.Y >= m.Dimensions.Y {
+		return core.NamedColorChar{}, false
+	}
+	layerIconFound := false
+	layerIcon := core.NamedColorChar{}
+	// order of precedence: actor, item, object, tile
+	if actor, ok := m.actors[pos]; ok {
+		layerIcon = actor.Icon
+		layerIconFound = true
+	}
+
+	if item, ok := m.items[pos]; ok {
+		layerIcon = m.resolveItem(item.Category)
+		layerIconFound = true
+	}
+
+	if object, ok := m.objects[pos]; ok {
+		layerIcon = m.resolveObject(object.NameOrCategory())
+		layerIconFound = true
+	}
+
+	if layerIconFound && layerIcon.HasBackground() {
+		return layerIcon, true
+	}
+
+	idx := m.Tiles[pos.Y*m.Dimensions.X+pos.X]
+	tile := m.resolveTile(idx)
+
+	if layerIconFound {
+		return layerIcon.WithBackground(tile.Icon.Bg), true
+	}
+
+	return tile.Icon, true
+}
+
+func (m *MapArea) RotateClockwise() {
+	newTiles := make([]int16, m.Dimensions.X*m.Dimensions.Y)
+	newActors := make(IconPositionMap)
+	newObjects := make(CategoryPositionMap)
+	newItems := make(CategoryPositionMap)
+	for y := 0; y < m.Dimensions.Y; y++ {
+		for x := 0; x < m.Dimensions.X; x++ {
+			newX := m.Dimensions.Y - y - 1
+			newY := x
+			newPos := geometry.Point{X: newX, Y: newY}
+			oldPos := geometry.Point{X: x, Y: y}
+			newTiles[newY*m.Dimensions.X+newX] = m.Tiles[y*m.Dimensions.X+x]
+			if actor, ok := m.actors[oldPos]; ok {
+				newActors[newPos] = actor
+			}
+			if object, ok := m.objects[oldPos]; ok {
+				newObjects[newPos] = object
+			}
+			if item, ok := m.items[oldPos]; ok {
+				newItems[newPos] = item
+			}
+		}
+	}
+	m.Tiles = newTiles
+	m.actors = newActors
+	m.objects = newObjects
+	m.items = newItems
+	m.Dimensions = geometry.Point{X: m.Dimensions.Y, Y: m.Dimensions.X}
+}
+
+type GameMap struct {
+	*MapArea
+
+	copyBuffer *MapArea
 }
 
 func NewGameMap(dimensions geometry.Point, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) *GameMap {
 	return &GameMap{
+		MapArea: NewMapArea(dimensions, resolver, items, objects),
+	}
+}
+
+func NewMapArea(dimensions geometry.Point, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) *MapArea {
+	return &MapArea{
 		Dimensions:    dimensions,
 		Tiles:         make([]int16, dimensions.X*dimensions.Y),
-		resolveTile:   resolver,
-		resolveObject: objects,
-		resolveItem:   items,
 		actors:        make(IconPositionMap),
 		objects:       make(CategoryPositionMap),
 		items:         make(CategoryPositionMap),
+		resolveTile:   resolver,
+		resolveObject: objects,
+		resolveItem:   items,
 	}
 }
 
@@ -199,22 +287,24 @@ func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, it
 	if len(tiles) == 0 {
 		return nil, nil
 	}
+	area := NewMapArea(dimensions, resolver, items, objects)
+	area.Tiles = tiles
 	g := &GameMap{
-		Dimensions:    dimensions,
-		Tiles:         tiles,
-		actors:        make(IconPositionMap),
-		objects:       make(CategoryPositionMap),
-		items:         make(CategoryPositionMap),
-		resolveTile:   resolver,
-		resolveObject: objects,
-		resolveItem:   items,
+		MapArea: area,
 	}
 
 	tileSet := LoadTileSet(path.Join(mapDirectory, "tileset.rec"))
 
-	objectRecords := recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "objects.rec")))
-	itemRecords := recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "items.rec")))
-	actorRecords := recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "actors.rec")))
+	var objectRecords, itemRecords, actorRecords []recfile.Record
+	if fxtools.FileExists(path.Join(mapDirectory, "objects.rec")) {
+		objectRecords = recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "objects.rec")))
+	}
+	if fxtools.FileExists(path.Join(mapDirectory, "items.rec")) {
+		itemRecords = recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "items.rec")))
+	}
+	if fxtools.FileExists(path.Join(mapDirectory, "actors.rec")) {
+		actorRecords = recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "actors.rec")))
+	}
 
 	g.actors = make(IconPositionMap)
 	g.objects = make(CategoryPositionMap)
@@ -254,6 +344,7 @@ func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, it
 func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 	os.Mkdir(mapDirectory, 0755)
 
+	mapName := path.Base(mapDirectory)
 	tiles, tileSet := g.generateTileSet()
 
 	err := textiles.SaveTileMap16(tiles, g.Dimensions, path.Join(mapDirectory, "tiles.bin"))
@@ -264,6 +355,22 @@ func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 	err = SaveTileSet(path.Join(mapDirectory, "tileSet.rec"), tileSet)
 	if err != nil {
 		return err
+	}
+
+	metaFile := path.Join(mapDirectory, "meta.rec")
+
+	if !fxtools.FileExists(metaFile) {
+		metaRecord := recfile.Record{
+			recfile.Field{Name: "Name", Value: mapName},
+			recfile.Field{Name: "MusicFile", Value: ""},
+			recfile.Field{Name: "IsOutdoor", Value: "false"},
+			recfile.Field{Name: "IndoorAmbientLight", Value: "(1.0, 1.0, 1.0)"},
+		}
+
+		err = recfile.Write(fxtools.MustCreate(metaFile), []recfile.Record{metaRecord})
+		if err != nil {
+			return err
+		}
 	}
 
 	objectRecords := g.objects.ToRecords()
@@ -283,6 +390,65 @@ func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 		return err
 	}
 	return nil
+}
+
+func (g *GameMap) Copy(area geometry.Rect) {
+	g.copyBuffer = g.copyArea(area)
+}
+
+func (g *GameMap) Paste(pos geometry.Point) {
+	if g.copyBuffer == nil {
+		return
+	}
+	g.pasteArea(g.copyBuffer, pos)
+}
+
+func (g *GameMap) GetCopyBuffer() *MapArea {
+	return g.copyBuffer
+}
+
+func (g *GameMap) copyArea(area geometry.Rect) *MapArea {
+	copyBuffer := NewMapArea(area.Size(), g.resolveTile, g.resolveItem, g.resolveObject)
+	for y := 0; y < area.Size().Y; y++ {
+		for x := 0; x < area.Size().X; x++ {
+			pos := geometry.Point{X: x, Y: y}
+			tileIdx := g.Tiles[(area.Min.Y+y)*g.Dimensions.X+area.Min.X+x]
+			copyBuffer.Tiles[y*area.Size().X+x] = tileIdx
+			if actor, ok := g.actors[pos]; ok {
+				copyBuffer.actors[pos] = actor.Copy()
+			}
+			if object, ok := g.objects[pos]; ok {
+				copyBuffer.objects[pos] = object.Copy()
+			}
+			if item, ok := g.items[pos]; ok {
+				copyBuffer.items[pos] = item.Copy()
+			}
+		}
+	}
+	return copyBuffer
+}
+
+func (g *GameMap) pasteArea(area *MapArea, pos geometry.Point) {
+	for y := 0; y < area.Dimensions.Y; y++ {
+		for x := 0; x < area.Dimensions.X; x++ {
+			newPos := geometry.Point{X: pos.X + x, Y: pos.Y + y}
+			oldPos := geometry.Point{X: x, Y: y}
+			tileIdx := area.Tiles[y*area.Dimensions.X+x]
+			if newPos.X < 0 || newPos.X >= g.Dimensions.X || newPos.Y < 0 || newPos.Y >= g.Dimensions.Y {
+				continue
+			}
+			g.Tiles[newPos.Y*g.Dimensions.X+newPos.X] = tileIdx
+			if actor, ok := area.actors[oldPos]; ok {
+				g.actors[newPos] = actor
+			}
+			if object, ok := area.objects[oldPos]; ok {
+				g.objects[newPos] = object
+			}
+			if item, ok := area.items[oldPos]; ok {
+				g.items[newPos] = item
+			}
+		}
+	}
 }
 
 func (g *GameMap) SetTile(pos geometry.Point, tile int16) {
@@ -319,7 +485,7 @@ func (g *GameMap) EditActorAt(app *cview.Application, panels *cview.Panels, pos 
 		return
 	}
 
-	widgets.EditRecord(app, panels, actor.ToRecord(), func(record recfile.Record) {
+	cview.EditRecord(app, panels, actor.ToRecord(), func(record recfile.Record) {
 		obj := textiles.NewIconRecord(record)
 		g.actors[pos] = obj
 	})
@@ -331,7 +497,7 @@ func (g *GameMap) EditObjectAt(app *cview.Application, panels *cview.Panels, pos
 		return
 	}
 
-	widgets.EditRecord(app, panels, object.ToRecord(), func(record recfile.Record) {
+	cview.EditRecord(app, panels, object.ToRecord(), func(record recfile.Record) {
 		obj := NewCategoryObject(record)
 		g.objects[pos] = obj
 	})
@@ -343,46 +509,10 @@ func (g *GameMap) EditItemAt(app *cview.Application, panels *cview.Panels, pos g
 		return
 	}
 
-	widgets.EditRecord(app, panels, item.ToRecord(), func(record recfile.Record) {
+	cview.EditRecord(app, panels, item.ToRecord(), func(record recfile.Record) {
 		obj := NewCategoryObject(record)
 		g.items[pos] = obj
 	})
-}
-
-func (g *GameMap) CharAt(pos geometry.Point) (core.NamedColorChar, bool) {
-	if pos.X < 0 || pos.X >= g.Dimensions.X || pos.Y < 0 || pos.Y >= g.Dimensions.Y {
-		return core.NamedColorChar{}, false
-	}
-	layerIconFound := false
-	layerIcon := core.NamedColorChar{}
-	// order of precedence: actor, item, object, tile
-	if actor, ok := g.actors[pos]; ok {
-		layerIcon = actor.Icon
-		layerIconFound = true
-	}
-
-	if item, ok := g.items[pos]; ok {
-		layerIcon = g.resolveItem(item.Category)
-		layerIconFound = true
-	}
-
-	if object, ok := g.objects[pos]; ok {
-		layerIcon = g.resolveObject(object.NameOrCategory())
-		layerIconFound = true
-	}
-
-	if layerIconFound && layerIcon.HasBackground() {
-		return layerIcon, true
-	}
-
-	idx := g.Tiles[pos.Y*g.Dimensions.X+pos.X]
-	tile := g.resolveTile(idx)
-
-	if layerIconFound {
-		return layerIcon.WithBackground(tile.Icon.Bg), true
-	}
-
-	return tile.Icon, true
 }
 
 func (g *GameMap) MapInfoAt(pos geometry.Point) []string {
@@ -434,4 +564,8 @@ func (g *GameMap) IsItemAt(pos geometry.Point) bool {
 func (g *GameMap) IsObjectAt(pos geometry.Point) bool {
 	_, ok := g.objects[pos]
 	return ok
+}
+
+func (g *GameMap) HasCopyBuffer() bool {
+	return g.copyBuffer != nil && g.copyBuffer.Dimensions.X > 0 && g.copyBuffer.Dimensions.Y > 0
 }

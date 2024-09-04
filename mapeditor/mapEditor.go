@@ -27,6 +27,7 @@ type MapEditor struct {
 	onHoverChangedHandler   func(mapPos geometry.Point)
 	app                     *cview.Application
 	panels                  *cview.Panels
+	pasteArea               *MapArea
 }
 
 func (m *MapEditor) DefaultFillCondition(source geometry.Point, curr geometry.Point, next geometry.Point) bool {
@@ -36,7 +37,7 @@ func (m *MapEditor) DefaultFillCondition(source geometry.Point, curr geometry.Po
 }
 
 func (m *MapEditor) SetDrawMode() {
-
+	m.pasteArea = nil
 }
 
 func NewMapEditor(
@@ -59,6 +60,8 @@ func NewMapEditor(
 		app:     app,
 		panels:  panels,
 	}
+
+	b.SetInputCapture(m.handleKeyboard)
 	b.SetMouseCapture(m.handleMouse)
 	return m
 }
@@ -79,15 +82,31 @@ func (m *MapEditor) Draw(screen tcell.Screen) {
 
 func (m *MapEditor) drawMap(screen tcell.Screen, x int, y int, width int, height int) (int, int, int, int) {
 	defaultMapStyle := tcell.StyleDefault
+	pasteMode := m.pasteArea != nil
+
 	for row := y; row < y+height; row++ {
 		for col := x; col < x+width; col++ {
 
 			mapPosX := col - x
 			mapPosY := row - y
 
+			if pasteMode {
+				// check for mouse position (m.currentMouse) and paste area
+				pasteSize := m.pasteArea.Dimensions
+				pasteStart := m.currentMouse
+				pasteEnd := geometry.Point{X: pasteStart.X + pasteSize.X, Y: pasteStart.Y + pasteSize.Y}
+				if pasteStart.X <= mapPosX && mapPosX < pasteEnd.X && pasteStart.Y <= mapPosY && mapPosY < pasteEnd.Y {
+					pastePos := geometry.Point{X: mapPosX - pasteStart.X, Y: mapPosY - pasteStart.Y}
+					ch, style := m.renderMapPosition(m.pasteArea, pastePos, defaultMapStyle)
+					screen.SetContent(col, row, ch, nil, style)
+					continue
+				}
+
+			}
+
 			mapPos := geometry.Point{X: mapPosX, Y: mapPosY}
 
-			ch, style := m.renderMapPosition(mapPos, defaultMapStyle)
+			ch, style := m.renderMapPosition(m.gameMap, mapPos, defaultMapStyle)
 
 			screen.SetContent(col, row, ch, nil, style)
 		}
@@ -95,7 +114,12 @@ func (m *MapEditor) drawMap(screen tcell.Screen, x int, y int, width int, height
 	// Space for other content.
 	return x, y, width, height
 }
-func (m *MapEditor) renderMapPosition(mapPos geometry.Point, style tcell.Style) (rune, tcell.Style) {
+
+type MapLike interface {
+	CharAt(pos geometry.Point) (core.NamedColorChar, bool)
+}
+
+func (m *MapEditor) renderMapPosition(mapArea MapLike, mapPos geometry.Point, style tcell.Style) (rune, tcell.Style) {
 	var ch rune
 	var textIcon core.NamedColorChar
 	foundIcon := false
@@ -104,7 +128,7 @@ func (m *MapEditor) renderMapPosition(mapPos geometry.Point, style tcell.Style) 
 		return char, tcell.StyleDefault
 	}
 
-	textIcon, foundIcon = m.gameMap.CharAt(mapPos)
+	textIcon, foundIcon = mapArea.CharAt(mapPos)
 
 	var fg, bg color.RGBA
 
@@ -243,6 +267,38 @@ func (m *MapEditor) SetObjectDrawing(object CategoryObject) {
 	}
 }
 
+func (m *MapEditor) SetSelectionMode() {
+	m.currentSelectionHandler = m.selectRect
+}
+
+func (m *MapEditor) selectRect(selection []geometry.Point) {
+	if len(selection) == 0 {
+		return
+	}
+	minX := math.MaxInt
+	minY := math.MaxInt
+	maxX := 0
+	maxY := 0
+
+	for _, pos := range selection {
+		if pos.X < minX {
+			minX = pos.X
+		}
+		if pos.Y < minY {
+			minY = pos.Y
+		}
+		if pos.X > maxX {
+			maxX = pos.X
+		}
+		if pos.Y > maxY {
+			maxY = pos.Y
+		}
+	}
+
+	selectionRect := geometry.NewRect(minX, minY, maxX, maxY)
+	m.gameMap.Copy(selectionRect)
+}
+
 func (m *MapEditor) removeMapObjectAt(pos geometry.Point) {
 	if m.gameMap.IsActorAt(pos) {
 		m.gameMap.RemoveActor(pos)
@@ -251,6 +307,42 @@ func (m *MapEditor) removeMapObjectAt(pos geometry.Point) {
 	} else if m.gameMap.IsObjectAt(pos) {
 		m.gameMap.RemoveObject(pos)
 	}
+}
+
+func (m *MapEditor) SetPasteMode() {
+	if !m.gameMap.HasCopyBuffer() {
+		return
+	}
+	m.pasteArea = m.gameMap.GetCopyBuffer()
+	m.currentSelectionHandler = m.pasteSelection
+}
+
+func (m *MapEditor) pasteSelection(points []geometry.Point) {
+	if len(points) == 0 {
+		return
+	}
+	targetPos := points[0]
+	m.gameMap.pasteArea(m.pasteArea, targetPos)
+}
+
+func (m *MapEditor) handleKeyboard(event *tcell.EventKey) *tcell.EventKey {
+	if event.Key() == tcell.KeyEscape {
+		m.SetDrawMode()
+		return nil
+	}
+
+	if event.Key() == tcell.KeyCtrlC {
+		m.SetBrush(fxtools.NewOutlinedRectangleBrush())
+		m.SetSelectionMode()
+	}
+
+	if event.Key() == tcell.KeyRune && (event.Rune() == 'v' || event.Rune() == 'V') {
+		m.SetBrush(fxtools.NewPencil())
+		m.SetPasteMode()
+		return nil
+	}
+
+	return event
 }
 
 func applyGamma(colorChannel uint8, gamma float64) uint8 {

@@ -27,6 +27,7 @@ type BrushHolder interface {
 	SetBrush(brush fxtools.Brush)
 	SetDrawMode()
 	DefaultFillCondition(source geometry.Point, curr geometry.Point, next geometry.Point) bool
+	SetSelectionMode()
 }
 
 type TextPainter struct {
@@ -254,26 +255,26 @@ func (u *TextPainter) initMapModeUI() {
 			u.Print(tile.String())
 		}
 		if secondaryIdx >= 0 && secondaryIdx < len(u.definedTiles) {
-			widgets.OpenModalForm(u.application, u.panels, []widgets.FormElementDescription{
+			cview.OpenModalForm(u.application, u.panels, []cview.FormElementDescription{
 				{
 					FieldName:    "name",
 					Label:        "Name",
-					PrefillValue: widgets.TypedString(u.definedTiles[secondaryIdx].Name),
-					FieldType:    widgets.FieldTypeString,
+					PrefillValue: cview.TypedString(u.definedTiles[secondaryIdx].Name),
+					FieldType:    cview.FieldTypeString,
 				},
 				{
 					FieldName:    "isTransparent",
 					Label:        "Is Transparent?",
-					PrefillValue: widgets.TypedStringFromBool(u.definedTiles[secondaryIdx].IsTransparent),
-					FieldType:    widgets.FieldTypeBool,
+					PrefillValue: cview.TypedStringFromBool(u.definedTiles[secondaryIdx].IsTransparent),
+					FieldType:    cview.FieldTypeBool,
 				},
 				{
 					FieldName:    "isWalkable",
 					Label:        "Is Walkable?",
-					PrefillValue: widgets.TypedStringFromBool(u.definedTiles[secondaryIdx].IsWalkable),
-					FieldType:    widgets.FieldTypeBool,
+					PrefillValue: cview.TypedStringFromBool(u.definedTiles[secondaryIdx].IsWalkable),
+					FieldType:    cview.FieldTypeBool,
 				},
-			}, func(m map[string]widgets.TypedString) {
+			}, func(m map[string]cview.TypedString) {
 				if name, exists := m["name"]; exists {
 					u.definedTiles[secondaryIdx].Name = name.AsString()
 				}
@@ -589,11 +590,19 @@ func (u *TextPainter) initIconUI() {
 	u.colorPicker = colorPicker
 	brushBar := widgets.NewButtonBar([]widgets.LabelItem{
 		{
+			Label:             "Select",
+			HighlightOnSelect: true,
+			Action: func() {
+				u.currentBrushHolder.SetBrush(fxtools.NewOutlinedRectangleBrush())
+				u.currentBrushHolder.SetSelectionMode()
+			},
+		},
+		{
 			Label:             "Pen",
 			HighlightOnSelect: true,
 			Action: func() {
 				u.currentBrushHolder.SetBrush(fxtools.NewPencil())
-				u.drawLayer.SetDrawMode()
+				u.currentBrushHolder.SetDrawMode()
 			},
 		},
 		{
@@ -601,7 +610,7 @@ func (u *TextPainter) initIconUI() {
 			HighlightOnSelect: true,
 			Action: func() {
 				u.currentBrushHolder.SetBrush(fxtools.NewLineBrush())
-				u.drawLayer.SetDrawMode()
+				u.currentBrushHolder.SetDrawMode()
 			},
 		},
 		{
@@ -609,7 +618,7 @@ func (u *TextPainter) initIconUI() {
 			HighlightOnSelect: true,
 			Action: func() {
 				u.currentBrushHolder.SetBrush(fxtools.NewOutlinedRectangleBrush())
-				u.drawLayer.SetDrawMode()
+				u.currentBrushHolder.SetDrawMode()
 			},
 		},
 		{
@@ -617,7 +626,7 @@ func (u *TextPainter) initIconUI() {
 			HighlightOnSelect: true,
 			Action: func() {
 				u.currentBrushHolder.SetBrush(fxtools.NewOutlinedCircleBrush())
-				u.drawLayer.SetDrawMode()
+				u.currentBrushHolder.SetDrawMode()
 			},
 		},
 		{
@@ -625,7 +634,7 @@ func (u *TextPainter) initIconUI() {
 			HighlightOnSelect: true,
 			Action: func() {
 				u.currentBrushHolder.SetBrush(fxtools.NewPaintBucket(u.currentBrushHolder.DefaultFillCondition))
-				u.drawLayer.SetDrawMode()
+				u.currentBrushHolder.SetDrawMode()
 			},
 		},
 	})
@@ -634,14 +643,14 @@ func (u *TextPainter) initIconUI() {
 }
 
 func (u *TextPainter) askForString(prompt, prefill string, onConfirm func(entered string)) {
-	widgets.OpenModalForm(u.application, u.panels, []widgets.FormElementDescription{
+	cview.OpenModalForm(u.application, u.panels, []cview.FormElementDescription{
 		{
 			FieldName:    "text",
-			PrefillValue: widgets.TypedString(prefill),
+			PrefillValue: cview.TypedString(prefill),
 			Label:        prompt,
-			FieldType:    widgets.FieldTypeString,
+			FieldType:    cview.FieldTypeString,
 		},
-	}, func(values map[string]widgets.TypedString) {
+	}, func(values map[string]cview.TypedString) {
 		if text, exists := values["text"]; exists {
 			onConfirm(text.AsString())
 		}
@@ -671,14 +680,14 @@ func pickerItemsFromIcons(icons []core.NamedColorChar, palette textiles.ColorPal
 
 func (u *TextPainter) editColorName(index int) {
 	oldName := u.palette.GetNamedColorByIndex(index).Name
-	widgets.OpenModalForm(u.application, u.panels, []widgets.FormElementDescription{
+	cview.OpenModalForm(u.application, u.panels, []cview.FormElementDescription{
 		{
 			FieldName:    "name",
 			Label:        "Name",
-			FieldType:    widgets.FieldTypeString,
-			PrefillValue: widgets.TypedString(oldName),
+			FieldType:    cview.FieldTypeString,
+			PrefillValue: cview.TypedString(oldName),
 		},
-	}, func(values map[string]widgets.TypedString) {
+	}, func(values map[string]cview.TypedString) {
 		if newName, exists := values["name"]; exists && newName.AsString() != oldName {
 			u.palette = u.palette.WithColorRenamed(oldName, newName.AsString())
 		}
@@ -723,42 +732,52 @@ func (u *TextPainter) onTerminalResized(width int, height int) {
 }
 
 func (u *TextPainter) handleMainInput(event *tcell.EventKey) *tcell.EventKey {
+
 	if event.Key() == tcell.KeyF1 {
 		u.currentBrushHolder.SetBrush(fxtools.NewPencil())
 		u.currentBrushHolder.SetDrawMode()
+		return nil
 	}
 	if event.Key() == tcell.KeyF2 {
 		u.currentBrushHolder.SetBrush(fxtools.NewLineBrush())
 		u.currentBrushHolder.SetDrawMode()
+		return nil
 	}
 	if event.Key() == tcell.KeyF3 {
 		u.currentBrushHolder.SetBrush(fxtools.NewOutlinedRectangleBrush())
 		u.currentBrushHolder.SetDrawMode()
+		return nil
 	}
 	if event.Key() == tcell.KeyF4 {
 		u.currentBrushHolder.SetBrush(fxtools.NewOutlinedCircleBrush())
 		u.currentBrushHolder.SetDrawMode()
+		return nil
 	}
 	if event.Key() == tcell.KeyF5 {
 		u.currentBrushHolder.SetBrush(fxtools.NewPaintBucket(u.currentBrushHolder.DefaultFillCondition))
 		u.currentBrushHolder.SetDrawMode()
+		return nil
 	}
 
 	if event.Key() == tcell.KeyTab {
 		u.drawLayer.SetSelectionHandler(u.pickRune)
+		return nil
 	}
 
 	if event.Key() == tcell.KeyF7 {
 		u.drawLayer.SetSelectionHandler(u.pickRuneAndSaveAsIcon)
+		return nil
 	}
 
 	if event.Key() == tcell.KeyF8 {
 		u.saveIcons()
+		return nil
 	}
 
 	if event.Key() == tcell.KeyF10 {
 		u.application.Stop()
 		u.writeToStdOut()
+		return nil
 	}
 
 	return event
@@ -888,26 +907,26 @@ func (u *TextPainter) tryLoadIcons() {
 }
 
 func (u *TextPainter) editTile(index int) {
-	widgets.OpenModalForm(u.application, u.panels, []widgets.FormElementDescription{
+	cview.OpenModalForm(u.application, u.panels, []cview.FormElementDescription{
 		{
 			FieldName:    "name",
 			Label:        "Name",
-			FieldType:    widgets.FieldTypeString,
-			PrefillValue: widgets.TypedString(u.definedTiles[index].Name),
+			FieldType:    cview.FieldTypeString,
+			PrefillValue: cview.TypedString(u.definedTiles[index].Name),
 		},
 		{
 			FieldName:    "isWalkable",
 			Label:        "Is Walkable",
-			FieldType:    widgets.FieldTypeBool,
-			PrefillValue: widgets.TypedStringFromBool(u.definedTiles[index].IsWalkable),
+			FieldType:    cview.FieldTypeBool,
+			PrefillValue: cview.TypedStringFromBool(u.definedTiles[index].IsWalkable),
 		},
 		{
 			FieldName:    "isTransparent",
 			Label:        "Is Transparent",
-			FieldType:    widgets.FieldTypeBool,
-			PrefillValue: widgets.TypedStringFromBool(u.definedTiles[index].IsTransparent),
+			FieldType:    cview.FieldTypeBool,
+			PrefillValue: cview.TypedStringFromBool(u.definedTiles[index].IsTransparent),
 		},
-	}, func(values map[string]widgets.TypedString) {
+	}, func(values map[string]cview.TypedString) {
 		if name, exists := values["name"]; exists {
 			u.definedTiles[index].Name = name.AsString()
 		}
@@ -1134,7 +1153,7 @@ func (u *TextPainter) editActorColor(idx int) {
 }
 func (u *TextPainter) editActorRecord(idx int) {
 	record := u.actorRecords[idx]
-	widgets.EditRecord(u.application, u.panels, record, func(modifiedRecord recfile.Record) {
+	cview.EditRecord(u.application, u.panels, record, func(modifiedRecord recfile.Record) {
 		u.actorRecords[idx] = modifiedRecord
 		u.updateActorPicker()
 		u.logWindow.SetText("Modified record")

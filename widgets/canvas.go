@@ -305,3 +305,7 @@ func (c *Canvas) SetCharFg(name string) {
 func (c *Canvas) SetCharBg(name string) {
 	c.currentChar.Bg = name
 }
+
+func (c *Canvas) SetSelectionMode() {
+
+}
