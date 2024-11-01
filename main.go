@@ -8,6 +8,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/memmaker/go/core"
 	"github.com/memmaker/go/cview"
+	"github.com/memmaker/go/fview"
 	"github.com/memmaker/go/fxtools"
 	"github.com/memmaker/go/geometry"
 	"github.com/memmaker/go/recfile"
@@ -102,6 +103,55 @@ func NewTextPainter(gameDataDir string, canvasSize geometry.Point) *TextPainter 
 	return u
 }
 
+func (u *TextPainter) openZoneMenu() {
+	fview.OpenSimpleMenu(u.application, u.panels, []fview.MenuItem{
+		{Name: "Add zone", Action: u.addZone, CloseMenus: true},
+		{Name: "Edit zone", Action: u.editZone, CloseMenus: true},
+		{Name: "Delete zone", Action: u.deleteZone, CloseMenus: true},
+	})
+}
+func (u *TextPainter) deleteZone() {
+	var zoneItems []fview.MenuItem
+	for _, zone := range u.mapEditor.GetZones() {
+		zoneItems = append(zoneItems, fview.MenuItem{
+			Name: zone,
+			Action: func() {
+				u.mapEditor.RemoveZone(zone)
+			},
+			CloseMenus: true,
+		})
+	}
+	if len(zoneItems) == 0 {
+		u.Print("No zones to delete")
+		return
+	}
+	menu := fview.OpenSimpleMenu(u.application, u.panels, zoneItems)
+	menu.SetTitle("Delete")
+}
+func (u *TextPainter) editZone() {
+	var zoneItems []fview.MenuItem
+	for _, zone := range u.mapEditor.GetZones() {
+		zoneItems = append(zoneItems, fview.MenuItem{
+			Name: zone,
+			Action: func() {
+				u.mapEditor.SetZoneDrawing(zone)
+			},
+			CloseMenus: true,
+		})
+	}
+	if len(zoneItems) == 0 {
+		u.Print("No zones to edit")
+		return
+	}
+	menu := fview.OpenSimpleMenu(u.application, u.panels, zoneItems)
+	menu.SetTitle("Edit")
+}
+func (u *TextPainter) addZone() {
+	u.askForString("Zone Name?", "", func(entered string) {
+		u.mapEditor.SetZoneDrawing(entered)
+	})
+}
+
 func (u *TextPainter) toggleMapMode() {
 	u.isMapMode = !u.isMapMode
 
@@ -165,7 +215,7 @@ func (u *TextPainter) setupMapModeLayout() {
 func (u *TextPainter) initMapModeUI() {
 	menuBar := widgets.NewButtonBar([]widgets.LabelItem{
 		{
-			Label: "New NamedTile",
+			Label: "New Tile",
 			Action: func() {
 				widgets.OpenModalPicker(u.application, u.panels, pickerItemsFromIcons(u.icons, u.palette), func(selectedIndex int) {
 					u.mergeTileSet([]mapeditor.NamedTile{
@@ -180,12 +230,12 @@ func (u *TextPainter) initMapModeUI() {
 			},
 		},
 		{
-			Label:  "Icon Mode",
-			Action: u.toggleMapMode,
+			Label:  "Zones",
+			Action: u.openZoneMenu,
 		},
 		{
-			Label:  "Load GameData",
-			Action: u.loadGameData,
+			Label:  "Icon Mode",
+			Action: u.toggleMapMode,
 		},
 		{
 			Label:  "Load Tileset",
@@ -210,20 +260,24 @@ func (u *TextPainter) initMapModeUI() {
 			},
 		},
 		{
-			Label: "Load testmap",
+			Label: "Load Map",
 			Action: func() {
-				prefill := "testmap"
-				if u.currentMapName != "" {
-					prefill = u.currentMapName
-				}
-				u.askForString("Map Name?", prefill, func(entered string) {
-					u.loadMap(path.Join(u.gameDataDirectory, "maps", entered))
-					u.currentMapName = entered
-				})
+				/*
+					prefill := "testmap"
+					if u.currentMapName != "" {
+						prefill = u.currentMapName
+					}
+					u.askForString("Map Name?", prefill, func(entered string) {
+						u.loadMap(path.Join(u.gameDataDirectory, "maps", entered))
+						u.currentMapName = entered
+					})
+
+				*/
+				u.openMapSelector(path.Join(u.gameDataDirectory, "maps"))
 			},
 		},
 		{
-			Label: "Save & Quit",
+			Label: "Quit",
 			Action: func() {
 				u.application.Stop()
 			},
@@ -274,6 +328,38 @@ func (u *TextPainter) initMapModeUI() {
 					PrefillValue: cview.TypedStringFromBool(u.definedTiles[secondaryIdx].IsWalkable),
 					FieldType:    cview.FieldTypeBool,
 				},
+				{
+					FieldName:    "isHazardous",
+					Label:        "Is Hazardous?",
+					PrefillValue: cview.TypedStringFromBool(u.definedTiles[secondaryIdx].IsHazardous()),
+					FieldType:    cview.FieldTypeBool,
+				},
+
+				{
+					FieldName:    "isMountable",
+					Label:        "Is Mountable?",
+					PrefillValue: cview.TypedStringFromBool(u.definedTiles[secondaryIdx].IsHazardous()),
+					FieldType:    cview.FieldTypeBool,
+				},
+
+				{
+					FieldName:    "isCrawable",
+					Label:        "Is Crawable?",
+					PrefillValue: cview.TypedStringFromBool(u.definedTiles[secondaryIdx].IsHazardous()),
+					FieldType:    cview.FieldTypeBool,
+				},
+				{
+					FieldName:    "isWater",
+					Label:        "Is Water?",
+					PrefillValue: cview.TypedStringFromBool(u.definedTiles[secondaryIdx].IsWater()),
+					FieldType:    cview.FieldTypeBool,
+				},
+				{
+					FieldName:    "isDestroyable",
+					Label:        "Is Destroyable?",
+					PrefillValue: cview.TypedStringFromBool(u.definedTiles[secondaryIdx].IsDestroyable()),
+					FieldType:    cview.FieldTypeBool,
+				},
 			}, func(m map[string]cview.TypedString) {
 				if name, exists := m["name"]; exists {
 					u.definedTiles[secondaryIdx].Name = name.AsString()
@@ -283,6 +369,21 @@ func (u *TextPainter) initMapModeUI() {
 				}
 				if isWalkable, exists := m["isWalkable"]; exists {
 					u.definedTiles[secondaryIdx].IsWalkable = isWalkable.AsBool()
+				}
+				if isHazardous, exists := m["isHazardous"]; exists {
+					u.definedTiles[secondaryIdx].Flags = u.definedTiles[secondaryIdx].Flags.WithFlagSetTo(mapeditor.TileFlagHazardous, isHazardous.AsBool())
+				}
+				if isMountable, exists := m["isMountable"]; exists {
+					u.definedTiles[secondaryIdx].Flags = u.definedTiles[secondaryIdx].Flags.WithFlagSetTo(mapeditor.TileFlagMountable, isMountable.AsBool())
+				}
+				if isCrawable, exists := m["isCrawable"]; exists {
+					u.definedTiles[secondaryIdx].Flags = u.definedTiles[secondaryIdx].Flags.WithFlagSetTo(mapeditor.TileFlagCrawlable, isCrawable.AsBool())
+				}
+				if isWater, exists := m["isWater"]; exists {
+					u.definedTiles[secondaryIdx].Flags = u.definedTiles[secondaryIdx].Flags.WithFlagSetTo(mapeditor.TileFlagWater, isWater.AsBool())
+				}
+				if isDestroyable, exists := m["isDestroyable"]; exists {
+					u.definedTiles[secondaryIdx].Flags = u.definedTiles[secondaryIdx].Flags.WithFlagSetTo(mapeditor.TileFlagDestroyable, isDestroyable.AsBool())
 				}
 				tilePicker.SetItems(pickerItemsFromTiles(u.definedTiles, u.palette))
 			})
@@ -446,7 +547,16 @@ func (u *TextPainter) initCoreUI() {
 	u.application.SetAfterResizeFunc(u.onTerminalResized)
 
 	u.application.EnableMouse(true)
-
+	u.application.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyCtrlC {
+			if u.isMapMode {
+				u.mapEditor.SetBrush(fxtools.NewOutlinedRectangleBrush())
+				u.mapEditor.SetSelectionMode()
+			}
+			return nil // don't forward, or else we will quit
+		}
+		return event
+	})
 	drawLayer := widgets.NewCanvas()
 	drawLayer.SetChar(core.NamedColorChar{
 		Char: '#',
@@ -505,10 +615,9 @@ func (u *TextPainter) initIconUI() {
 			Action: u.saveIcons,
 		},
 		{
-			Label: "Save & Quit",
+			Label: "Quit",
 			Action: func() {
 				u.application.Stop()
-				u.writeToStdOut()
 			},
 		},
 	})
@@ -1119,10 +1228,15 @@ func (u *TextPainter) updateObjectPicker() {
 	pickerItems := make([]widgets.PickerItem, 0)
 	for _, record := range u.objectTemplates {
 		objectName := record.FindValueForKeyIgnoreCase("category")
+		objectIcon := objectName
+		if field, exists := record.FindFieldIgnoreCase("iconoverride"); exists {
+			objectIcon = field.Value
+			objectName = objectIcon
+		}
 		if field, exists := record.FindFieldIgnoreCase("name"); exists {
 			objectName = field.Value
 		}
-		typeIcon := u.objectIconResolver(objectName)
+		typeIcon := u.objectIconResolver(objectIcon)
 		pickerItems = append(pickerItems, widgets.PickerItem{
 			Name:      objectName,
 			Icon:      typeIcon.Char,
@@ -1255,6 +1369,30 @@ func (u *TextPainter) saveIconsForObjects(objectTypesFilePath string) {
 
 	recfile.Write(objectTypes, records)
 	u.Print("Saved object types")
+}
+
+func (u *TextPainter) openMapSelector(mapDir string) {
+	entries, err := os.ReadDir(mapDir)
+	if err != nil {
+		panic(err)
+	}
+	var menuItems []fview.MenuItem
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		mapName := entry.Name()
+		menuItems = append(menuItems, fview.MenuItem{
+			Name: mapName,
+			Action: func() {
+				u.currentMapName = mapName
+				u.loadMap(path.Join(mapDir, mapName))
+			},
+			CloseMenus: true,
+		})
+	}
+	fview.OpenSimpleMenu(u.application, u.panels, menuItems)
 }
 
 func IndexToXY(index int, width int) (int, int) {

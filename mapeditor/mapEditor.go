@@ -1,6 +1,7 @@
 package mapeditor
 
 import (
+	"cmp"
 	"github.com/gdamore/tcell/v2"
 	"github.com/memmaker/go/core"
 	"github.com/memmaker/go/cview"
@@ -9,6 +10,7 @@ import (
 	"github.com/memmaker/go/textiles"
 	"image/color"
 	"math"
+	"slices"
 )
 
 type MapEditor struct {
@@ -28,6 +30,7 @@ type MapEditor struct {
 	app                     *cview.Application
 	panels                  *cview.Panels
 	pasteArea               *MapArea
+	currentZone             string
 }
 
 func (m *MapEditor) DefaultFillCondition(source geometry.Point, curr geometry.Point, next geometry.Point) bool {
@@ -38,6 +41,7 @@ func (m *MapEditor) DefaultFillCondition(source geometry.Point, curr geometry.Po
 
 func (m *MapEditor) SetDrawMode() {
 	m.pasteArea = nil
+	m.currentZone = ""
 }
 
 func NewMapEditor(
@@ -140,6 +144,13 @@ func (m *MapEditor) renderMapPosition(mapArea MapLike, mapPos geometry.Point, st
 		bg = color.RGBA{0, 0, 0, 255}
 	}
 
+	if m.currentZone != "" && mapArea == m.gameMap {
+		gameMap := mapArea.(*GameMap)
+		if gameMap.IsZoneAt(mapPos, m.currentZone) {
+			bg = fxtools.NewColorFromRGBA(bg).Multiply(fxtools.HDRColor{R: 0.1, G: 0.9, B: 0.1}).ToRGBA()
+		}
+	}
+
 	style = style.Foreground(tcell.NewRGBColor(int32(applyGamma(fg.R, m.gamma)), int32(applyGamma(fg.G, m.gamma)), int32(applyGamma(fg.B, m.gamma))))
 	style = style.Background(tcell.NewRGBColor(int32(applyGamma(bg.R, m.gamma)), int32(applyGamma(bg.G, m.gamma)), int32(applyGamma(bg.B, m.gamma))))
 
@@ -174,7 +185,11 @@ func (m *MapEditor) handleMouse(action cview.MouseAction, event *tcell.EventMous
 	}
 	if action == cview.MouseRightClick {
 		if isModified {
-			m.removeMapObjectAt(m.currentMouse)
+			if m.currentZone != "" {
+				m.gameMap.RemoveZoneAt(m.currentMouse, m.currentZone)
+			} else {
+				m.removeMapObjectAt(m.currentMouse)
+			}
 		} else if m.gameMap.IsActorAt(m.currentMouse) {
 			m.gameMap.EditActorAt(m.app, m.panels, m.currentMouse)
 		} else if m.gameMap.IsItemAt(m.currentMouse) {
@@ -219,6 +234,7 @@ func (m *MapEditor) SaveMap(mapDirectory string) error {
 }
 
 func (m *MapEditor) LoadMap(mapDirectory string, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) []NamedTile {
+	m.currentZone = ""
 	gameMap, tileset := LoadMapFromDisk(mapDirectory, resolver, items, objects)
 	if gameMap == nil {
 		return nil
@@ -269,6 +285,7 @@ func (m *MapEditor) SetObjectDrawing(object CategoryObject) {
 
 func (m *MapEditor) SetSelectionMode() {
 	m.currentSelectionHandler = m.selectRect
+	m.currentZone = ""
 }
 
 func (m *MapEditor) selectRect(selection []geometry.Point) {
@@ -295,7 +312,7 @@ func (m *MapEditor) selectRect(selection []geometry.Point) {
 		}
 	}
 
-	selectionRect := geometry.NewRect(minX, minY, maxX, maxY)
+	selectionRect := geometry.NewRect(minX, minY, maxX+1, maxY+1)
 	m.gameMap.Copy(selectionRect)
 }
 
@@ -309,6 +326,14 @@ func (m *MapEditor) removeMapObjectAt(pos geometry.Point) {
 	}
 }
 
+func (m *MapEditor) SetZoneDrawing(zoneName string) {
+	m.currentZone = zoneName
+	m.currentSelectionHandler = func(points []geometry.Point) {
+		for _, point := range points {
+			m.gameMap.SetZone(point, zoneName)
+		}
+	}
+}
 func (m *MapEditor) SetPasteMode() {
 	if !m.gameMap.HasCopyBuffer() {
 		return
@@ -336,13 +361,28 @@ func (m *MapEditor) handleKeyboard(event *tcell.EventKey) *tcell.EventKey {
 		m.SetSelectionMode()
 	}
 
-	if event.Key() == tcell.KeyRune && (event.Rune() == 'v' || event.Rune() == 'V') {
+	if event.Key() == tcell.KeyCtrlV {
 		m.SetBrush(fxtools.NewPencil())
 		m.SetPasteMode()
 		return nil
 	}
 
 	return event
+}
+
+func (m *MapEditor) GetZones() []string {
+	var zones []string
+	for zone := range m.gameMap.zones {
+		zones = append(zones, zone)
+	}
+	slices.SortStableFunc(zones, func(i, j string) int {
+		return cmp.Compare(i, j)
+	})
+	return zones
+}
+
+func (m *MapEditor) RemoveZone(zone string) {
+	m.gameMap.RemoveZone(zone)
 }
 
 func applyGamma(colorChannel uint8, gamma float64) uint8 {

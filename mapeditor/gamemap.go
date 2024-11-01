@@ -14,12 +14,40 @@ import (
 	"strings"
 )
 
+type TileFlags uint8
+
+func (f TileFlags) Has(flag TileFlags) bool {
+	return f&flag != 0
+}
+
+func (f TileFlags) With(flag TileFlags) TileFlags {
+	return f | flag
+}
+
+func (f TileFlags) WithFlagSetTo(flag TileFlags, asBool bool) TileFlags {
+	if asBool {
+		return f | flag
+	}
+	return f &^ flag
+}
+
+const TileNoFlags TileFlags = 0
+
+const ( // bitwise flags
+	TileFlagHazardous TileFlags = 1 << iota
+	TileFlagWater
+	TileFlagRadiated
+	TileFlagMountable
+	TileFlagCrawlable
+	TileFlagDestroyable
+)
+
 type NamedTile struct {
 	Icon          core.NamedColorChar
 	Name          string
 	IsWalkable    bool
 	IsTransparent bool
-	IsDamaging    bool
+	Flags         TileFlags
 }
 
 func SaveTileSet(filename string, tiles []NamedTile) error {
@@ -51,12 +79,24 @@ func (t NamedTile) ToRecord() recfile.Record {
 		recfile.Field{Name: "Background", Value: t.Icon.Bg},
 		recfile.Field{Name: "IsWalkable", Value: strconv.FormatBool(t.IsWalkable)},
 		recfile.Field{Name: "IsTransparent", Value: strconv.FormatBool(t.IsTransparent)},
-		recfile.Field{Name: "IsDamaging", Value: strconv.FormatBool(t.IsDamaging)},
+		recfile.Field{Name: "Flags", Value: strconv.FormatUint(uint64(t.Flags), 10)},
 	}
 }
 
 func (t NamedTile) String() string {
-	return fmt.Sprintf("%s (W: %c, T: %c, D: %c)", t.Name, boolAsChar(t.IsWalkable), boolAsChar(t.IsTransparent), boolAsChar(t.IsDamaging))
+	return fmt.Sprintf("%s (W: %c, T: %c, HA: %c, WT: %c, MT: %c, CR: %c, DS: %c)", t.Name, boolAsChar(t.IsWalkable), boolAsChar(t.IsTransparent), boolAsChar(t.IsHazardous()), boolAsChar(t.IsWater()), boolAsChar(t.Flags.Has(TileFlagMountable)), boolAsChar(t.Flags.Has(TileFlagCrawlable)), boolAsChar(t.Flags.Has(TileFlagDestroyable)))
+}
+
+func (t NamedTile) IsHazardous() bool {
+	return t.Flags.Has(TileFlagHazardous)
+}
+
+func (t NamedTile) IsWater() bool {
+	return t.Flags.Has(TileFlagWater)
+}
+
+func (t NamedTile) IsDestroyable() bool {
+	return t.Flags.Has(TileFlagDestroyable)
 }
 func boolAsChar(b bool) rune {
 	if b { // checkmark unicode
@@ -80,8 +120,8 @@ func TileFromRecord(record recfile.Record) NamedTile {
 			tile.IsWalkable = field.AsBool()
 		case "istransparent":
 			tile.IsTransparent = field.AsBool()
-		case "isdamaging":
-			tile.IsDamaging = field.AsBool()
+		case "flags":
+			tile.Flags = TileFlags(field.AsInt())
 		}
 	}
 	return tile
@@ -116,16 +156,18 @@ const (
 )
 
 type CategoryObject struct {
-	Name     string
-	Category string
-	Meta     recfile.Record
+	Name         string
+	Category     string
+	IconOverride string
+	Meta         recfile.Record
 }
 
 func NewCategoryObject(record recfile.Record) CategoryObject {
 	return CategoryObject{
-		Name:     record.FindValueForKeyIgnoreCase("Name"),
-		Category: record.FindValueForKeyIgnoreCase("Category"),
-		Meta:     record.WithoutFieldsIgnoreCase("Name", "Category"),
+		Name:         record.FindValueForKeyIgnoreCase("Name"),
+		Category:     record.FindValueForKeyIgnoreCase("Category"),
+		IconOverride: record.FindValueForKeyIgnoreCase("IconOverride"),
+		Meta:         record.WithoutFieldsIgnoreCase("Name", "Category", "IconOverride"),
 	}
 }
 
@@ -143,13 +185,16 @@ func (o CategoryObject) ToRecord() recfile.Record {
 	if o.Name != "" {
 		record = append(record, recfile.Field{Name: "Name", Value: o.Name})
 	}
+	if o.IconOverride != "" {
+		record = append(record, recfile.Field{Name: "IconOverride", Value: o.IconOverride})
+	}
 	record = append(record, o.Meta...)
 	return record
 }
 
-func (o CategoryObject) NameOrCategory() string {
-	if o.Name != "" {
-		return o.Name
+func (o CategoryObject) IconIdentifier() string {
+	if o.IconOverride != "" {
+		return o.IconOverride
 	}
 	return o.Category
 }
@@ -186,6 +231,8 @@ type MapArea struct {
 	objects    CategoryPositionMap
 	items      CategoryPositionMap
 
+	zones map[string]map[geometry.Point]bool
+
 	resolveTile   func(int16) NamedTile
 	resolveObject func(string) core.NamedColorChar
 	resolveItem   func(string) core.NamedColorChar
@@ -209,7 +256,7 @@ func (m *MapArea) CharAt(pos geometry.Point) (core.NamedColorChar, bool) {
 	}
 
 	if object, ok := m.objects[pos]; ok {
-		layerIcon = m.resolveObject(object.NameOrCategory())
+		layerIcon = m.resolveObject(object.IconIdentifier())
 		layerIconFound = true
 	}
 
@@ -295,6 +342,10 @@ func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, it
 
 	tileSet := LoadTileSet(path.Join(mapDirectory, "tileset.rec"))
 
+	if fxtools.FileExists(path.Join(mapDirectory, "zones.bin")) {
+		g.zones = textiles.ReadZones(path.Join(mapDirectory, "zones.bin"))
+	}
+
 	var objectRecords, itemRecords, actorRecords []recfile.Record
 	if fxtools.FileExists(path.Join(mapDirectory, "objects.rec")) {
 		objectRecords = recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "objects.rec")))
@@ -355,6 +406,11 @@ func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 	err = SaveTileSet(path.Join(mapDirectory, "tileSet.rec"), tileSet)
 	if err != nil {
 		return err
+	}
+
+	zoneErr := textiles.SaveZones(path.Join(mapDirectory, "zones.bin"), g.zones)
+	if zoneErr != nil {
+		return zoneErr
 	}
 
 	metaFile := path.Join(mapDirectory, "meta.rec")
@@ -568,4 +624,35 @@ func (g *GameMap) IsObjectAt(pos geometry.Point) bool {
 
 func (g *GameMap) HasCopyBuffer() bool {
 	return g.copyBuffer != nil && g.copyBuffer.Dimensions.X > 0 && g.copyBuffer.Dimensions.Y > 0
+}
+
+func (g *GameMap) SetZone(point geometry.Point, zoneName string) {
+	if g.zones == nil {
+		g.zones = make(map[string]map[geometry.Point]bool)
+	}
+	if g.zones[zoneName] == nil {
+		g.zones[zoneName] = make(map[geometry.Point]bool)
+	}
+	g.zones[zoneName][point] = true
+}
+
+func (g *GameMap) IsZoneAt(pos geometry.Point, zoneName string) bool {
+	if g.zones[zoneName] == nil {
+		return false
+	}
+	if _, ok := g.zones[zoneName][pos]; !ok {
+		return false
+	}
+	return g.zones[zoneName][pos]
+}
+
+func (g *GameMap) RemoveZone(zone string) {
+	delete(g.zones, zone)
+}
+
+func (g *GameMap) RemoveZoneAt(mouse geometry.Point, zone string) {
+	delete(g.zones[zone], mouse)
+	if len(g.zones[zone]) == 0 {
+		delete(g.zones, zone)
+	}
 }
