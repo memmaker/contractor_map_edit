@@ -10,6 +10,7 @@ import (
 	"github.com/memmaker/go/textiles"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -64,7 +65,7 @@ func SaveTileSet(filename string, tiles []NamedTile) error {
 }
 
 func LoadTileSet(filename string) []NamedTile {
-	records := recfile.Read(fxtools.MustOpen(filename))
+	records, _ := recfile.Read(fxtools.MustOpen(filename))
 	tiles := make([]NamedTile, len(records))
 	for i, record := range records {
 		tiles[i] = TileFromRecord(record)
@@ -214,6 +215,22 @@ func (o CategoryObject) Copy() CategoryObject {
 	}
 }
 
+func (o CategoryObject) WithCategory(newCat string) CategoryObject {
+	return CategoryObject{
+		Name:     o.Name,
+		Category: newCat,
+		Meta:     o.Meta,
+	}
+}
+
+func (o CategoryObject) WithMeta(newMeta recfile.Record) CategoryObject {
+	return CategoryObject{
+		Name:     o.Name,
+		Category: o.Category,
+		Meta:     newMeta,
+	}
+}
+
 type CategoryPositionMap map[geometry.Point]CategoryObject
 
 func (m CategoryPositionMap) ToRecords() []recfile.Record {
@@ -330,7 +347,7 @@ func NewMapArea(dimensions geometry.Point, resolver func(idx int16) NamedTile, i
 }
 
 func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) (*GameMap, []NamedTile) {
-	dimensions, tiles := textiles.ReadTileMap16(path.Join(mapDirectory, "tiles.bin"))
+	dimensions, tiles := textiles.ReadTileMap16(filepath.Join(mapDirectory, "tiles.bin"))
 	if len(tiles) == 0 {
 		return nil, nil
 	}
@@ -340,21 +357,21 @@ func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, it
 		MapArea: area,
 	}
 
-	tileSet := LoadTileSet(path.Join(mapDirectory, "tileset.rec"))
+	tileSet := LoadTileSet(filepath.Join(mapDirectory, "tileset.rec"))
 
-	if fxtools.FileExists(path.Join(mapDirectory, "zones.bin")) {
-		g.zones = textiles.ReadZones(path.Join(mapDirectory, "zones.bin"))
+	if fxtools.FileExists(filepath.Join(mapDirectory, "zones.bin")) {
+		g.zones = textiles.ReadZones(filepath.Join(mapDirectory, "zones.bin"))
 	}
 
 	var objectRecords, itemRecords, actorRecords []recfile.Record
-	if fxtools.FileExists(path.Join(mapDirectory, "objects.rec")) {
-		objectRecords = recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "objects.rec")))
+	if fxtools.FileExists(filepath.Join(mapDirectory, "objects.rec")) {
+		objectRecords, _ = recfile.Read(fxtools.MustOpen(filepath.Join(mapDirectory, "objects.rec")))
 	}
-	if fxtools.FileExists(path.Join(mapDirectory, "items.rec")) {
-		itemRecords = recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "items.rec")))
+	if fxtools.FileExists(filepath.Join(mapDirectory, "items.rec")) {
+		itemRecords, _ = recfile.Read(fxtools.MustOpen(filepath.Join(mapDirectory, "items.rec")))
 	}
-	if fxtools.FileExists(path.Join(mapDirectory, "actors.rec")) {
-		actorRecords = recfile.Read(fxtools.MustOpen(path.Join(mapDirectory, "actors.rec")))
+	if fxtools.FileExists(filepath.Join(mapDirectory, "actors.rec")) {
+		actorRecords, _ = recfile.Read(fxtools.MustOpen(filepath.Join(mapDirectory, "actors.rec")))
 	}
 
 	g.actors = make(IconPositionMap)
@@ -398,22 +415,22 @@ func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 	mapName := path.Base(mapDirectory)
 	tiles, tileSet := g.generateTileSet()
 
-	err := textiles.SaveTileMap16(tiles, g.Dimensions, path.Join(mapDirectory, "tiles.bin"))
+	err := textiles.SaveTileMap16(tiles, g.Dimensions, filepath.Join(mapDirectory, "tiles.bin"))
 	if err != nil {
 		return err
 	}
 
-	err = SaveTileSet(path.Join(mapDirectory, "tileSet.rec"), tileSet)
+	err = SaveTileSet(filepath.Join(mapDirectory, "tileSet.rec"), tileSet)
 	if err != nil {
 		return err
 	}
 
-	zoneErr := textiles.SaveZones(path.Join(mapDirectory, "zones.bin"), g.zones)
+	zoneErr := textiles.SaveZones(filepath.Join(mapDirectory, "zones.bin"), g.zones)
 	if zoneErr != nil {
 		return zoneErr
 	}
 
-	metaFile := path.Join(mapDirectory, "meta.rec")
+	metaFile := filepath.Join(mapDirectory, "meta.rec")
 
 	if !fxtools.FileExists(metaFile) {
 		metaRecord := recfile.Record{
@@ -433,15 +450,15 @@ func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 	itemRecords := g.items.ToRecords()
 	actorRecords := g.actors.ToRecords()
 
-	err = recfile.Write(fxtools.MustCreate(path.Join(mapDirectory, "objects.rec")), objectRecords)
+	err = recfile.Write(fxtools.MustCreate(filepath.Join(mapDirectory, "objects.rec")), objectRecords)
 	if err != nil {
 		return err
 	}
-	err = recfile.Write(fxtools.MustCreate(path.Join(mapDirectory, "items.rec")), itemRecords)
+	err = recfile.Write(fxtools.MustCreate(filepath.Join(mapDirectory, "items.rec")), itemRecords)
 	if err != nil {
 		return err
 	}
-	err = recfile.Write(fxtools.MustCreate(path.Join(mapDirectory, "actors.rec")), actorRecords)
+	err = recfile.Write(fxtools.MustCreate(filepath.Join(mapDirectory, "actors.rec")), actorRecords)
 	if err != nil {
 		return err
 	}
@@ -467,16 +484,17 @@ func (g *GameMap) copyArea(area geometry.Rect) *MapArea {
 	copyBuffer := NewMapArea(area.Size(), g.resolveTile, g.resolveItem, g.resolveObject)
 	for y := 0; y < area.Size().Y; y++ {
 		for x := 0; x < area.Size().X; x++ {
+			orgPos := geometry.Point{X: area.Min.X + x, Y: area.Min.Y + y}
 			pos := geometry.Point{X: x, Y: y}
 			tileIdx := g.Tiles[(area.Min.Y+y)*g.Dimensions.X+area.Min.X+x]
 			copyBuffer.Tiles[y*area.Size().X+x] = tileIdx
-			if actor, ok := g.actors[pos]; ok {
+			if actor, ok := g.actors[orgPos]; ok {
 				copyBuffer.actors[pos] = actor.Copy()
 			}
-			if object, ok := g.objects[pos]; ok {
+			if object, ok := g.objects[orgPos]; ok {
 				copyBuffer.objects[pos] = object.Copy()
 			}
-			if item, ok := g.items[pos]; ok {
+			if item, ok := g.items[orgPos]; ok {
 				copyBuffer.items[pos] = item.Copy()
 			}
 		}
@@ -493,6 +511,9 @@ func (g *GameMap) pasteArea(area *MapArea, pos geometry.Point) {
 			if newPos.X < 0 || newPos.X >= g.Dimensions.X || newPos.Y < 0 || newPos.Y >= g.Dimensions.Y {
 				continue
 			}
+			delete(g.actors, newPos)
+			delete(g.objects, newPos)
+			delete(g.items, newPos)
 			g.Tiles[newPos.Y*g.Dimensions.X+newPos.X] = tileIdx
 			if actor, ok := area.actors[oldPos]; ok {
 				g.actors[newPos] = actor
@@ -546,12 +567,158 @@ func (g *GameMap) EditActorAt(app *cview.Application, panels *cview.Panels, pos 
 		g.actors[pos] = obj
 	})
 }
+func (g *GameMap) EditDoorAt(app *cview.Application, panels *cview.Panels, pos geometry.Point) {
+	door, objExists := g.objects[pos]
+	if !objExists {
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(door.Category), "door") {
+		return
+	}
+	/*
+			Category: LockedDoor
+			AudioCue: wood_door
+			Description: a door
+			LockFlag: bar_door_security
+			NumberLock: 1996
+		    LockDifficulty: medium
+	*/
+	dmap := door.Meta.ToLowerMap(",")
+	diffAsNumberString := diffToNumberString(dmap.GetStringOrDefault("lockdifficulty", "veryeasy"))
+	cview.OpenModalForm(app, panels, []cview.FormElementDescription{
+		{
+			FieldName:    "category",
+			PrefillValue: cview.TypedString(door.Category),
+			Label:        "Category",
+			FieldType:    cview.FieldTypeString, // should be select
+		},
+		{
+			FieldName:    "audio_cue",
+			PrefillValue: cview.TypedString(dmap.GetStringOrDefault("audiocue", "")),
+			Label:        "Audio Cue",
+			FieldType:    cview.FieldTypeString, // should be select
+		},
+		{
+			FieldName:    "description",
+			Label:        "Description",
+			PrefillValue: cview.TypedString(dmap.GetStringOrDefault("description", "a door")),
+		},
+		{
+			FieldName:    "lock_flag",
+			Label:        "Lock Flag",
+			PrefillValue: cview.TypedString(dmap.GetStringOrDefault("lockflag", "")),
+			FieldType:    cview.FieldTypeString,
+		},
+		{
+			FieldName:    "number_lock",
+			Label:        "Number Lock",
+			PrefillValue: cview.TypedString(dmap.GetStringOrDefault("numberlock", "")),
+			FieldType:    cview.FieldTypeString,
+		},
+		{
+			FieldName:    "lock_difficulty",
+			Label:        "Lock Difficulty",
+			PrefillValue: cview.TypedString(diffAsNumberString),
+			FieldType:    cview.FieldTypeIntegerSlider, // should be select?
+		},
+	}, func(values map[string]cview.TypedString) {
+		oldMeta := door.Meta
+		for k, v := range values {
+			if k == "category" {
+				continue
+			}
+			value := v.AsString()
+			if k == "lock_difficulty" {
+				value = numberStringToDiff(value)
+			}
+			oldMeta = oldMeta.WithKeyValueIgnoreCase(k, value)
+		}
+		door = door.WithCategory(values["category"].AsString())
+		door = door.WithMeta(oldMeta)
+		g.objects[pos] = door
+	})
+}
 
+/*
+case "trivial": = "0"
+
+	return Trivial
+
+case "veryeasy":
+
+	return VeryEasy
+
+case "easy":
+
+	return Easy
+
+case "medium":
+
+	return Medium
+
+case "hard":
+
+	return Hard
+
+case "veryhard":
+
+	return VeryHard
+
+case "superhuman":
+
+	return SuperHuman
+*/
+func diffToNumberString(orDefault string) string {
+	switch strings.ToLower(orDefault) {
+	case "trivial":
+		return "0"
+	case "veryeasy":
+		return "1"
+	case "easy":
+		return "2"
+	case "medium":
+		return "3"
+	case "hard":
+		return "4"
+	case "veryhard":
+		return "5"
+	case "superhuman":
+		return "6"
+	}
+	return orDefault
+}
+func numberStringToDiff(orDefault string) string {
+	switch orDefault {
+	case "0":
+		return "Trivial"
+	case "1":
+		return "VeryEasy"
+	case "2":
+		return "Easy"
+	case "3":
+		return "Medium"
+	case "4":
+		return "Hard"
+	case "5":
+		return "VeryHard"
+	case "6":
+		return "SuperHuman"
+	}
+	return orDefault
+}
 func (g *GameMap) EditObjectAt(app *cview.Application, panels *cview.Panels, pos geometry.Point) {
 	object, exists := g.objects[pos]
 	if !exists {
 		return
 	}
+
+	/* TODO: bugfix
+	   if strings.HasSuffix(strings.ToLower(object.Category), "door") {
+	   	g.EditDoorAt(app, panels, pos)
+	   	return
+	   }
+
+	*/
 
 	cview.EditRecord(app, panels, object.ToRecord(), func(record recfile.Record) {
 		obj := NewCategoryObject(record)
@@ -655,4 +822,8 @@ func (g *GameMap) RemoveZoneAt(mouse geometry.Point, zone string) {
 	if len(g.zones[zone]) == 0 {
 		delete(g.zones, zone)
 	}
+}
+
+func (g *GameMap) GetEmptyCopyBuffer(dimensions geometry.Point) *MapArea {
+	return NewMapArea(dimensions, g.resolveTile, g.resolveItem, g.resolveObject)
 }

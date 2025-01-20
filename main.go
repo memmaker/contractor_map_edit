@@ -17,8 +17,9 @@ import (
 	"io"
 	"log"
 	"os"
-	"path"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -91,13 +92,14 @@ type TextPainter struct {
 	// There fields are: Name, Icon, Foreground, Background (Opt), InventoryColor
 	objectTypeRecords []recfile.Record
 	currentMapName    string
+	lastSelectedTile  int
 }
 
 func NewTextPainter(gameDataDir string, canvasSize geometry.Point) *TextPainter {
 	u := &TextPainter{
 		canvasSize:        canvasSize,
 		gameDataDirectory: gameDataDir,
-		palette:           textiles.NewPaletteFromFileOrDefault(path.Join(gameDataDir, "definitions", "palette.rec")),
+		palette:           textiles.NewPaletteFromFileOrDefault(filepath.Join(gameDataDir, "definitions", "palette.rec")),
 	}
 	u.init()
 	return u
@@ -234,6 +236,10 @@ func (u *TextPainter) initMapModeUI() {
 			Action: u.openZoneMenu,
 		},
 		{
+			Label:  "Text Tiles",
+			Action: u.EnterTextForPasting,
+		},
+		{
 			Label:  "Icon Mode",
 			Action: u.toggleMapMode,
 		},
@@ -253,7 +259,7 @@ func (u *TextPainter) initMapModeUI() {
 					prefill = u.currentMapName
 				}
 				u.askForString("Map Name?", prefill, func(entered string) {
-					mapDir := path.Join(u.gameDataDirectory, "maps", entered)
+					mapDir := filepath.Join(u.gameDataDirectory, "maps", entered)
 					u.saveMap(mapDir)
 					u.currentMapName = entered
 				})
@@ -268,12 +274,12 @@ func (u *TextPainter) initMapModeUI() {
 						prefill = u.currentMapName
 					}
 					u.askForString("Map Name?", prefill, func(entered string) {
-						u.loadMap(path.Join(u.gameDataDirectory, "maps", entered))
+						u.loadMap(filepath.Join(u.gameDataDirectory, "maps", entered))
 						u.currentMapName = entered
 					})
 
 				*/
-				u.openMapSelector(path.Join(u.gameDataDirectory, "maps"))
+				u.openMapSelector(filepath.Join(u.gameDataDirectory, "maps"))
 			},
 		},
 		{
@@ -305,6 +311,7 @@ func (u *TextPainter) initMapModeUI() {
 	tilePicker.SetChangeHandler(func(primaryIdx int, secondaryIdx int, primary widgets.PickerItem, secondary widgets.PickerItem) {
 		if primaryIdx >= 0 && primaryIdx < len(u.definedTiles) {
 			u.mapEditor.SetTileDrawing(primaryIdx)
+			u.lastSelectedTile = primaryIdx
 			tile := u.definedTiles[primaryIdx]
 			u.Print(tile.String())
 		}
@@ -507,7 +514,7 @@ func (u *TextPainter) initMapModeUI() {
 
 func (u *TextPainter) saveMap(mapDir string) {
 	u.mapEditor.SaveMap(mapDir)
-	u.saveIconsForObjects(path.Join(mapDir, "iconsForObjects.rec"))
+	u.saveIconsForObjects(filepath.Join(mapDir, "iconsForObjects.rec"))
 }
 
 func (u *TextPainter) loadMap(mapDirectory string) {
@@ -516,18 +523,18 @@ func (u *TextPainter) loadMap(mapDirectory string) {
 		u.definedTiles = tiles
 		u.tilePicker.SetItems(pickerItemsFromTiles(u.definedTiles, u.palette))
 	}
-	u.loadIconsForObjects(path.Join(mapDirectory, "iconsForObjects.rec"))
+	u.loadIconsForObjects(filepath.Join(mapDirectory, "iconsForObjects.rec"))
 
 	u.updateItemPicker()
 	u.updateObjectPicker()
 }
 
 func (u *TextPainter) saveTileSet() {
-	mapeditor.SaveTileSet(path.Join(u.gameDataDirectory, "definitions", "tileSet.rec"), u.definedTiles)
+	mapeditor.SaveTileSet(filepath.Join(u.gameDataDirectory, "definitions", "tileSet.rec"), u.definedTiles)
 }
 
 func (u *TextPainter) loadTileSet() {
-	u.mergeTileSet(mapeditor.LoadTileSet(path.Join(u.gameDataDirectory, "definitions", "tileSet.rec")))
+	u.mergeTileSet(mapeditor.LoadTileSet(filepath.Join(u.gameDataDirectory, "definitions", "tileSet.rec")))
 }
 
 func pickerItemsFromTiles(tiles []mapeditor.NamedTile, palette textiles.ColorPalette) []widgets.PickerItem {
@@ -751,6 +758,31 @@ func (u *TextPainter) initIconUI() {
 	u.brushBar = brushBar
 }
 
+func (u *TextPainter) askForTileText(onConfirm func(entered string, isFloor bool)) {
+	cview.OpenModalForm(u.application, u.panels, []cview.FormElementDescription{
+		{
+			FieldName:    "text",
+			PrefillValue: cview.TypedString(""),
+			Label:        "Text",
+			FieldType:    cview.FieldTypeString,
+		},
+		{
+			FieldName:    "type",
+			PrefillValue: cview.TypedString("false"),
+			Label:        "Is Floor?",
+			FieldType:    cview.FieldTypeBool,
+		},
+	}, func(values map[string]cview.TypedString) {
+		if text, exists := values["text"]; exists && text.AsString() != "" {
+			isFloor := false
+			if isFloorValue, typeExists := values["type"]; typeExists {
+				isFloor = isFloorValue.AsBool()
+			}
+			onConfirm(text.AsString(), isFloor)
+		}
+	})
+}
+
 func (u *TextPainter) askForString(prompt, prefill string, onConfirm func(entered string)) {
 	cview.OpenModalForm(u.application, u.panels, []cview.FormElementDescription{
 		{
@@ -889,6 +921,11 @@ func (u *TextPainter) handleMainInput(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
+	if event.Key() == tcell.KeyF11 {
+		u.EnterTextForPasting()
+		return nil
+	}
+
 	return event
 }
 
@@ -987,7 +1024,7 @@ func (u *TextPainter) onColorChanged(rgba color.RGBA) {
 }
 
 func (u *TextPainter) savePalette() {
-	writePalErr := u.palette.ToFile(path.Join(u.gameDataDirectory, "definitions", "palette.rec"))
+	writePalErr := u.palette.ToFile(filepath.Join(u.gameDataDirectory, "definitions", "palette.rec"))
 	if writePalErr != nil {
 		log.Fatal(writePalErr)
 	}
@@ -995,7 +1032,7 @@ func (u *TextPainter) savePalette() {
 
 func (u *TextPainter) saveIcons() {
 	// use gob to write icons
-	iconFile := fxtools.MustCreate(path.Join(u.gameDataDirectory, "definitions", "icons.rec"))
+	iconFile := fxtools.MustCreate(filepath.Join(u.gameDataDirectory, "definitions", "icons.rec"))
 	defer iconFile.Close()
 	records := make([]recfile.Record, len(u.icons))
 	for i, icon := range u.icons {
@@ -1005,9 +1042,9 @@ func (u *TextPainter) saveIcons() {
 }
 
 func (u *TextPainter) tryLoadIcons() {
-	iconFile := fxtools.MustOpen(path.Join(u.gameDataDirectory, "definitions", "icons.rec"))
+	iconFile := fxtools.MustOpen(filepath.Join(u.gameDataDirectory, "definitions", "icons.rec"))
 	defer iconFile.Close()
-	records := recfile.Read(iconFile)
+	records, _ := recfile.Read(iconFile)
 	decodedIcons := make([]core.NamedColorChar, len(records))
 	for i, record := range records {
 		decodedIcons[i] = recordToNamedColorChar(record)
@@ -1052,6 +1089,36 @@ func (u *TextPainter) SetCanvasSize(point geometry.Point) {
 	u.canvasSize = point
 }
 
+func (u *TextPainter) EnterTextForPasting() {
+	u.askForTileText(u.PasteTextAsTiles)
+}
+
+func (u *TextPainter) PasteTextAsTiles(text string, isFloor bool) {
+	//m.gameMap.PasteText(m.currentMouse, text, fg, bg)
+	if u.lastSelectedTile < 0 || u.lastSelectedTile >= len(u.definedTiles) {
+		return
+	}
+	fg := u.definedTiles[u.lastSelectedTile].Icon.Fg
+	bg := u.definedTiles[u.lastSelectedTile].Icon.Bg
+	var tiles []mapeditor.NamedTile
+	for _, ch := range text {
+		tiles = append(tiles, mapeditor.NamedTile{
+			Icon:          core.NamedColorChar{Char: ch, Fg: fg, Bg: bg},
+			Name:          string(ch),
+			IsWalkable:    isFloor,
+			IsTransparent: isFloor,
+		})
+	}
+	u.mergeTileSet(tiles)
+	asIndex := make([]int16, len(tiles))
+	for i, tile := range tiles {
+		tileIndex := slices.Index(u.definedTiles, tile)
+		asIndex[i] = int16(tileIndex)
+	}
+
+	u.mapEditor.PasteTilesAsHorizontalLine(asIndex)
+}
+
 func (u *TextPainter) mergeTileSet(loadedSet []mapeditor.NamedTile) {
 	if len(u.definedTiles) == 0 {
 		u.definedTiles = loadedSet
@@ -1065,7 +1132,6 @@ func (u *TextPainter) mergeTileSet(loadedSet []mapeditor.NamedTile) {
 				u.definedTiles = append(u.definedTiles, tile)
 				tileSet[tile] = true
 			}
-
 		}
 	}
 	u.tilePicker.SetItems(pickerItemsFromTiles(u.definedTiles, u.palette))
@@ -1091,49 +1157,55 @@ func (u *TextPainter) init() {
 }
 
 func (u *TextPainter) loadGameData() {
-	u.loadIconsForItems(path.Join(u.gameDataDirectory, "definitions", "iconsForItems.rec"))
-	u.loadIconsForObjects(path.Join(u.gameDataDirectory, "definitions", "iconsForObjects.rec"))
+	u.loadIconsForItems(filepath.Join(u.gameDataDirectory, "definitions", "iconsForItems.rec"))
+	u.loadIconsForObjects(filepath.Join(u.gameDataDirectory, "definitions", "iconsForObjects.rec"))
 
-	filePath := path.Join(u.gameDataDirectory, "definitions")
+	filePath := filepath.Join(u.gameDataDirectory, "definitions")
 
-	actorFilePath := path.Join(filePath, "actors.rec")
-	weaponsFilePath := path.Join(filePath, "weapons.rec")
-	ammoFilePath := path.Join(filePath, "ammo.rec")
-	armorFilePath := path.Join(filePath, "armor.rec")
-	foodFilePath := path.Join(filePath, "food.rec")
-	miscFilePath := path.Join(filePath, "miscItems.rec")
+	actorFilePath := filepath.Join(filePath, "actors.rec")
+	weaponsFilePath := filepath.Join(filePath, "weapons.rec")
+	ammoFilePath := filepath.Join(filePath, "ammo.rec")
+	armorFilePath := filepath.Join(filePath, "armor.rec")
+	foodFilePath := filepath.Join(filePath, "food.rec")
+	miscFilePath := filepath.Join(filePath, "miscItems.rec")
+	consumablesFilePath := filepath.Join(filePath, "consumables.rec")
 
 	actors := fxtools.MustOpen(actorFilePath)
 	defer actors.Close()
-	u.actorRecords = recfile.Read(actors)
+	u.actorRecords, _ = recfile.Read(actors)
 
 	weapons := fxtools.MustOpen(weaponsFilePath)
 	defer weapons.Close()
-	weaponRecords := recfile.Read(weapons)
+	weaponRecords, _ := recfile.Read(weapons)
 
 	ammo := fxtools.MustOpen(ammoFilePath)
 	defer ammo.Close()
-	ammoRecords := recfile.Read(ammo)
+	ammoRecords, _ := recfile.Read(ammo)
 
 	armors := fxtools.MustOpen(armorFilePath)
 	defer armors.Close()
-	armorRecords := recfile.Read(armors)
+	armorRecords, _ := recfile.Read(armors)
 
 	food := fxtools.MustOpen(foodFilePath)
 	defer food.Close()
-	foodRecords := recfile.Read(food)
+	foodRecords, _ := recfile.Read(food)
+
+	consumables := fxtools.MustOpen(consumablesFilePath)
+	defer consumables.Close()
+	consumableRecords, _ := recfile.Read(consumables)
 
 	misc := fxtools.MustOpen(miscFilePath)
 	defer misc.Close()
-	miscRecords := recfile.Read(misc)
+	miscRecords, _ := recfile.Read(misc)
 
 	itemRecords := append(weaponRecords, ammoRecords...)
 	itemRecords = append(itemRecords, armorRecords...)
 	itemRecords = append(itemRecords, foodRecords...)
+	itemRecords = append(itemRecords, consumableRecords...)
 	itemRecords = append(itemRecords, miscRecords...)
 
 	u.itemTemplates = itemRecords
-	u.objectTemplates = recfile.Read(fxtools.MustOpen(path.Join(filePath, "objectTemplates.rec")))
+	u.objectTemplates, _ = recfile.Read(fxtools.MustOpen(filepath.Join(filePath, "objectTemplates.rec")))
 
 	u.updateActorPicker()
 	u.updateItemPicker()
@@ -1150,7 +1222,7 @@ func (u *TextPainter) loadIconsForObjects(objectTypesFilePath string) {
 
 	u.objectIcons = mapToColoredChar(ReadIconRecordsIntoLowerCaseMap(objTypes))
 	objTypes.Seek(0, 0)
-	u.objectTypeRecords = recfile.Read(objTypes)
+	u.objectTypeRecords, _ = recfile.Read(objTypes)
 }
 func OpenOrEmpty(filename string) *os.File {
 	open, err := os.Open(filename)
@@ -1170,7 +1242,7 @@ func (u *TextPainter) loadIconsForItems(itemCategoriesFilePath string) {
 	u.itemIcons = mapToColoredChar(ReadIconRecordsIntoLowerCaseMap(itemCats))
 
 	itemCats.Seek(0, 0)
-	u.itemCategoryRecords = recfile.Read(itemCats)
+	u.itemCategoryRecords, _ = recfile.Read(itemCats)
 }
 
 func mapToColoredChar(caseMap map[string]textiles.IconRecord) map[string]core.NamedColorChar {
@@ -1309,7 +1381,7 @@ func (u *TextPainter) Print(text string) {
 }
 
 func (u *TextPainter) saveActorRecords() {
-	actorFilePath := path.Join(u.gameDataDirectory, "definitions", "actors.rec")
+	actorFilePath := filepath.Join(u.gameDataDirectory, "definitions", "actors.rec")
 	actors := fxtools.MustCreate(actorFilePath)
 	defer actors.Close()
 	recfile.Write(actors, u.actorRecords)
@@ -1317,7 +1389,7 @@ func (u *TextPainter) saveActorRecords() {
 }
 
 func (u *TextPainter) saveIconsForItemsGlobally() {
-	itemCategoriesFilePath := path.Join(u.gameDataDirectory, "definitions", "iconsForItems.rec")
+	itemCategoriesFilePath := filepath.Join(u.gameDataDirectory, "definitions", "iconsForItems.rec")
 	u.saveIconsForItems(itemCategoriesFilePath)
 }
 
@@ -1345,7 +1417,7 @@ func (u *TextPainter) saveIconsForItems(itemCategoriesFilePath string) {
 }
 
 func (u *TextPainter) saveIconsForObjectsGlobally() {
-	objectTypesFilePath := path.Join(u.gameDataDirectory, "definitions", "iconsForObjects.rec")
+	objectTypesFilePath := filepath.Join(u.gameDataDirectory, "definitions", "iconsForObjects.rec")
 	u.saveIconsForObjects(objectTypesFilePath)
 }
 
@@ -1387,7 +1459,7 @@ func (u *TextPainter) openMapSelector(mapDir string) {
 			Name: mapName,
 			Action: func() {
 				u.currentMapName = mapName
-				u.loadMap(path.Join(mapDir, mapName))
+				u.loadMap(filepath.Join(mapDir, mapName))
 			},
 			CloseMenus: true,
 		})
@@ -1429,7 +1501,7 @@ func main() {
 }
 
 func ReadIconRecordsIntoLowerCaseMap(reader io.Reader) map[string]textiles.IconRecord {
-	records := recfile.Read(reader)
+	records, _ := recfile.Read(reader)
 	categories := make(map[string]textiles.IconRecord, len(records))
 	for _, record := range records {
 		category := textiles.NewIconRecord(record)

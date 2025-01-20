@@ -31,6 +31,7 @@ type MapEditor struct {
 	panels                  *cview.Panels
 	pasteArea               *MapArea
 	currentZone             string
+	lastTileIndex           int
 }
 
 func (m *MapEditor) DefaultFillCondition(source geometry.Point, curr geometry.Point, next geometry.Point) bool {
@@ -42,6 +43,7 @@ func (m *MapEditor) DefaultFillCondition(source geometry.Point, curr geometry.Po
 func (m *MapEditor) SetDrawMode() {
 	m.pasteArea = nil
 	m.currentZone = ""
+	//m.SetTileDrawing(m.lastTileIndex)
 }
 
 func NewMapEditor(
@@ -252,6 +254,7 @@ func (m *MapEditor) SetHoverHandler(onHoverChanged func(mapPos geometry.Point)) 
 }
 
 func (m *MapEditor) SetTileDrawing(idx int) {
+	m.lastTileIndex = idx
 	m.currentSelectionHandler = func(points []geometry.Point) {
 		for _, point := range points {
 			m.gameMap.SetTile(point, int16(idx))
@@ -342,8 +345,14 @@ func (m *MapEditor) SetPasteMode() {
 	m.currentSelectionHandler = m.pasteSelection
 }
 
+func (m *MapEditor) PasteTilesAsHorizontalLine(tiles []int16) {
+	pasteArea := m.gameMap.GetEmptyCopyBuffer(geometry.Point{X: len(tiles), Y: 1})
+	pasteArea.Tiles = tiles
+	m.pasteArea = pasteArea
+	m.currentSelectionHandler = m.pasteSelection
+}
 func (m *MapEditor) pasteSelection(points []geometry.Point) {
-	if len(points) == 0 {
+	if len(points) == 0 || m.pasteArea == nil {
 		return
 	}
 	targetPos := points[0]
@@ -353,6 +362,7 @@ func (m *MapEditor) pasteSelection(points []geometry.Point) {
 func (m *MapEditor) handleKeyboard(event *tcell.EventKey) *tcell.EventKey {
 	if event.Key() == tcell.KeyEscape {
 		m.SetDrawMode()
+		m.SetTileDrawing(m.lastTileIndex)
 		return nil
 	}
 
