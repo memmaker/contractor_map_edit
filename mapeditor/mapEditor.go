@@ -177,7 +177,7 @@ func (m *MapEditor) handleMouse(action cview.MouseAction, event *tcell.EventMous
 			}
 		}
 	}
-	isModified := event.Modifiers() != 0
+	isModified := event != nil && event.Modifiers() != 0
 	if action == cview.MouseLeftDown {
 		m.isLeftDown = true
 		m.onMouseLeftDown(m.currentMouse)
@@ -192,12 +192,12 @@ func (m *MapEditor) handleMouse(action cview.MouseAction, event *tcell.EventMous
 			} else {
 				m.removeMapObjectAt(m.currentMouse)
 			}
-		} else if m.gameMap.IsActorAt(m.currentMouse) {
-			m.gameMap.EditActorAt(m.app, m.panels, m.currentMouse)
-		} else if m.gameMap.IsItemAt(m.currentMouse) {
-			m.gameMap.EditItemAt(m.app, m.panels, m.currentMouse)
 		} else if m.gameMap.IsObjectAt(m.currentMouse) {
 			m.gameMap.EditObjectAt(m.app, m.panels, m.currentMouse)
+		} else if m.gameMap.IsItemAt(m.currentMouse) {
+			m.gameMap.EditItemAt(m.app, m.panels, m.currentMouse)
+		} else if m.gameMap.IsActorAt(m.currentMouse) {
+			m.gameMap.EditActorAt(m.app, m.panels, m.currentMouse)
 		}
 	}
 
@@ -231,18 +231,22 @@ func (m *MapEditor) onMouseLeftUp(mouse geometry.Point) {
 	}
 }
 
+func (m *MapEditor) PlaceholderFields() []string {
+	return m.gameMap.PlaceholderFields()
+}
+
 func (m *MapEditor) SaveMap(mapDirectory string) error {
 	return m.gameMap.SaveMapToDisk(mapDirectory)
 }
 
-func (m *MapEditor) LoadMap(mapDirectory string, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) []NamedTile {
+func (m *MapEditor) LoadMap(mapDirectory string, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) ([]NamedTile, error) {
 	m.currentZone = ""
-	gameMap, tileset := LoadMapFromDisk(mapDirectory, resolver, items, objects)
-	if gameMap == nil {
-		return nil
+	gameMap, tileset, err := LoadMapFromDisk(mapDirectory, resolver, items, objects)
+	if err != nil {
+		return nil, err
 	}
 	m.gameMap = gameMap
-	return tileset
+	return tileset, nil
 }
 
 func (m *MapEditor) GetMapInfoAt(pos geometry.Point) []string {
@@ -320,12 +324,12 @@ func (m *MapEditor) selectRect(selection []geometry.Point) {
 }
 
 func (m *MapEditor) removeMapObjectAt(pos geometry.Point) {
-	if m.gameMap.IsActorAt(pos) {
-		m.gameMap.RemoveActor(pos)
+	if m.gameMap.IsObjectAt(pos) {
+		m.gameMap.RemoveObject(pos)
 	} else if m.gameMap.IsItemAt(pos) {
 		m.gameMap.RemoveItem(pos)
-	} else if m.gameMap.IsObjectAt(pos) {
-		m.gameMap.RemoveObject(pos)
+	} else if m.gameMap.IsActorAt(pos) {
+		m.gameMap.RemoveActor(pos)
 	}
 }
 

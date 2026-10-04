@@ -414,7 +414,7 @@ func (u *TextPainter) initMapModeUI() {
 		if primaryIdx >= 0 && primaryIdx < len(u.actorRecords) {
 			actorRecord := u.actorRecords[primaryIdx]
 			u.Print(actorRecord.String())
-			mapObject := textiles.NewIconRecord(actorRecord)
+			mapObject := mapeditor.NewIconRecordSafe(actorRecord)
 			u.mapEditor.SetActorDrawing(mapObject)
 		}
 		if secondaryIdx >= 0 && secondaryIdx < len(u.actorRecords) {
@@ -513,16 +513,29 @@ func (u *TextPainter) initMapModeUI() {
 }
 
 func (u *TextPainter) saveMap(mapDir string) {
-	u.mapEditor.SaveMap(mapDir)
+	if bad := u.mapEditor.PlaceholderFields(); len(bad) > 0 {
+		shown := bad[:min(len(bad), 5)]
+		u.Print(fmt.Sprintf("Not saved: %d CHANGEME value(s): %s", len(bad), strings.Join(shown, "; ")))
+		return
+	}
+	if err := u.mapEditor.SaveMap(mapDir); err != nil {
+		u.Print("Could not save map: " + err.Error())
+		return
+	}
 	u.saveIconsForObjects(filepath.Join(mapDir, "iconsForObjects.rec"))
 }
 
 func (u *TextPainter) loadMap(mapDirectory string) {
-	tiles := u.mapEditor.LoadMap(mapDirectory, u.tileResolver, u.itemIconResolver, u.objectIconResolver)
+	tiles, err := u.mapEditor.LoadMap(mapDirectory, u.tileResolver, u.itemIconResolver, u.objectIconResolver)
+	if err != nil {
+		u.Print("Could not load map: " + err.Error())
+		return
+	}
 	if len(tiles) > 0 {
 		u.definedTiles = tiles
 		u.tilePicker.SetItems(pickerItemsFromTiles(u.definedTiles, u.palette))
 	}
+	u.loadIconsForItems(filepath.Join(mapDirectory, "iconsForItems.rec"))
 	u.loadIconsForObjects(filepath.Join(mapDirectory, "iconsForObjects.rec"))
 
 	u.updateItemPicker()
@@ -534,7 +547,11 @@ func (u *TextPainter) saveTileSet() {
 }
 
 func (u *TextPainter) loadTileSet() {
-	u.mergeTileSet(mapeditor.LoadTileSet(filepath.Join(u.gameDataDirectory, "definitions", "tileSet.rec")))
+	defTiles, err := mapeditor.LoadTileSet(filepath.Join(u.gameDataDirectory, "definitions", "tileSet.rec"))
+	if err != nil {
+		u.Print("Could not load tile set: " + err.Error())
+	}
+	u.mergeTileSet(defTiles)
 }
 
 func pickerItemsFromTiles(tiles []mapeditor.NamedTile, palette textiles.ColorPalette) []widgets.PickerItem {
@@ -932,7 +949,7 @@ func (u *TextPainter) handleMainInput(event *tcell.EventKey) *tcell.EventKey {
 func (u *TextPainter) writeToStdOut() {
 	for y := 0; y < u.canvasSize.Y; y++ {
 		for x := 0; x < u.canvasSize.X; x++ {
-			runeAtBuffer := u.drawLayer.GetCharAt(geometry.Point{x, y}).Char
+			runeAtBuffer := u.drawLayer.GetCharAt(geometry.Point{X: x, Y: y}).Char
 			os.Stdout.Write([]byte(string(runeAtBuffer)))
 		}
 		os.Stdout.Write([]byte("\n"))
@@ -1224,13 +1241,6 @@ func (u *TextPainter) loadIconsForObjects(objectTypesFilePath string) {
 	objTypes.Seek(0, 0)
 	u.objectTypeRecords, _ = recfile.Read(objTypes)
 }
-func OpenOrEmpty(filename string) *os.File {
-	open, err := os.Open(filename)
-	if err != nil { // return fake file
-		return &os.File{}
-	}
-	return open
-}
 func (u *TextPainter) loadIconsForItems(itemCategoriesFilePath string) {
 
 	itemCats, opErr := os.Open(itemCategoriesFilePath)
@@ -1258,7 +1268,7 @@ func (u *TextPainter) updateActorPicker() {
 	for i, record := range u.actorRecords {
 		pickerItems[i] = widgets.PickerItem{
 			Name:      record.FindValueForKeyIgnoreCase("name"),
-			Icon:      []rune(record.FindValueForKeyIgnoreCase("icon"))[0],
+			Icon:      firstRuneOr(record.FindValueForKeyIgnoreCase("icon"), '?'),
 			IconStyle: tcell.StyleDefault.Foreground(toTcellColor(u.palette.Get(record.FindValueForKeyIgnoreCase("foreground")))),
 		}
 	}
@@ -1393,26 +1403,26 @@ func (u *TextPainter) saveIconsForItemsGlobally() {
 	u.saveIconsForItems(itemCategoriesFilePath)
 }
 
-func (u *TextPainter) saveIconsForItems(itemCategoriesFilePath string) {
-	itemCats := fxtools.MustCreate(itemCategoriesFilePath)
-	defer itemCats.Close()
-	records := u.itemCategoryRecords
+// withIcon updates only the icon fields of a record, keeping everything else.
+func withIcon(record recfile.Record, icon core.NamedColorChar) recfile.Record {
+	record = record.WithKeyValueIgnoreCase("Icon", string(icon.Char)).WithKeyValueIgnoreCase("Foreground", icon.Fg)
+	if icon.HasBackground() {
+		return record.WithKeyValueIgnoreCase("Background", icon.Bg)
+	}
+	return record.WithoutFieldsIgnoreCase("Background")
+}
 
-	for i, cat := range records {
-		catName := cat.FindValueForKeyIgnoreCase("Name")
-		icon := u.itemIconResolver(catName)
-		records[i] = recfile.Record{
-			recfile.Field{Name: "Name", Value: catName},
-			recfile.Field{Name: "Icon", Value: string(icon.Char)},
-			recfile.Field{Name: "Foreground", Value: icon.Fg},
-			recfile.Field{Name: "InventoryColor", Value: cat.FindValueForKeyIgnoreCase("InventoryColor")},
-		}
-		if icon.HasBackground() {
-			records[i] = append(records[i], recfile.Field{Name: "Background", Value: icon.Bg})
-		}
+func (u *TextPainter) saveIconsForItems(itemCategoriesFilePath string) {
+	records := make([]recfile.Record, len(u.itemCategoryRecords))
+	for i, cat := range u.itemCategoryRecords {
+		records[i] = withIcon(cat, u.itemIconResolver(cat.FindValueForKeyIgnoreCase("Name")))
 	}
 
-	recfile.Write(itemCats, records)
+	if err := mapeditor.WriteRecordsAtomic(itemCategoriesFilePath, records); err != nil {
+		u.Print("Could not save item categories: " + err.Error())
+		return
+	}
+	u.itemCategoryRecords = records
 	u.Print("Saved item categories")
 }
 
@@ -1422,24 +1432,16 @@ func (u *TextPainter) saveIconsForObjectsGlobally() {
 }
 
 func (u *TextPainter) saveIconsForObjects(objectTypesFilePath string) {
-	objectTypes := fxtools.MustCreate(objectTypesFilePath)
-	defer objectTypes.Close()
-	records := u.objectTypeRecords
-
-	for i, obj := range records {
-		objName := obj.FindValueForKeyIgnoreCase("name")
-		icon := u.objectIconResolver(objName)
-		records[i] = recfile.Record{
-			recfile.Field{Name: "Name", Value: objName},
-			recfile.Field{Name: "Icon", Value: string(icon.Char)},
-			recfile.Field{Name: "Foreground", Value: icon.Fg},
-		}
-		if icon.HasBackground() {
-			records[i] = append(records[i], recfile.Field{Name: "Background", Value: icon.Bg})
-		}
+	records := make([]recfile.Record, len(u.objectTypeRecords))
+	for i, obj := range u.objectTypeRecords {
+		records[i] = withIcon(obj, u.objectIconResolver(obj.FindValueForKeyIgnoreCase("name")))
 	}
 
-	recfile.Write(objectTypes, records)
+	if err := mapeditor.WriteRecordsAtomic(objectTypesFilePath, records); err != nil {
+		u.Print("Could not save object types: " + err.Error())
+		return
+	}
+	u.objectTypeRecords = records
 	u.Print("Saved object types")
 }
 
@@ -1481,18 +1483,18 @@ func main() {
 	gameDir := "."
 	canvasSize := geometry.Point{X: 80, Y: 23}
 	if len(os.Args) > 1 {
-		dimensionRegex := "([0-9]+)x([0-9]+)"
+		dimensionRegex := regexp.MustCompile(`^\d+x\d+$`)
 		for _, arg := range os.Args[1:] {
-			if dimensions, _ := regexp.MatchString(dimensionRegex, arg); dimensions {
-				parts := strings.Split(arg, "x")
-				width, _ := strconv.Atoi(parts[0])
-				height, _ := strconv.Atoi(parts[1])
-				canvasSize = geometry.Point{X: width, Y: height}
-			} else if strings.HasPrefix(arg, "data=") {
+			if strings.HasPrefix(arg, "data=") {
 				dataDir := strings.TrimSpace(strings.TrimPrefix(arg, "data="))
 				if dataDir != "" {
 					gameDir = dataDir
 				}
+			} else if dimensionRegex.MatchString(arg) {
+				parts := strings.Split(arg, "x")
+				width, _ := strconv.Atoi(parts[0])
+				height, _ := strconv.Atoi(parts[1])
+				canvasSize = geometry.Point{X: width, Y: height}
 			}
 		}
 	}
@@ -1504,7 +1506,7 @@ func ReadIconRecordsIntoLowerCaseMap(reader io.Reader) map[string]textiles.IconR
 	records, _ := recfile.Read(reader)
 	categories := make(map[string]textiles.IconRecord, len(records))
 	for _, record := range records {
-		category := textiles.NewIconRecord(record)
+		category := mapeditor.NewIconRecordSafe(record)
 		categories[strings.ToLower(category.Name)] = category
 	}
 	return categories
@@ -1539,4 +1541,11 @@ func recordToNamedColorChar(record recfile.Record) core.NamedColorChar {
 		}
 	}
 	return char
+}
+
+func firstRuneOr(s string, fallback rune) rune {
+	if r := []rune(s); len(r) > 0 {
+		return r[0]
+	}
+	return fallback
 }

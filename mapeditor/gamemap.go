@@ -1,6 +1,7 @@
 package mapeditor
 
 import (
+	"errors"
 	"fmt"
 	"github.com/memmaker/go/core"
 	"github.com/memmaker/go/cview"
@@ -11,6 +12,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -57,20 +60,58 @@ func SaveTileSet(filename string, tiles []NamedTile) error {
 		tileRecord := tile.ToRecord()
 		records[i] = tileRecord
 	}
-	err := recfile.Write(fxtools.MustCreate(filename), records)
-	if err != nil {
-		return err
-	}
-	return nil
+	return WriteRecordsAtomic(filename, records)
 }
 
-func LoadTileSet(filename string) []NamedTile {
-	records, _ := recfile.Read(fxtools.MustOpen(filename))
+func LoadTileSet(filename string) ([]NamedTile, error) {
+	records, err := readRecords(filename)
+	if err != nil {
+		return nil, err
+	}
 	tiles := make([]NamedTile, len(records))
 	for i, record := range records {
 		tiles[i] = TileFromRecord(record)
 	}
-	return tiles
+	return tiles, nil
+}
+
+// readRecords reads a rec file. A missing file yields no records, any other open error is returned.
+func readRecords(filename string) ([]recfile.Record, error) {
+	file, err := os.Open(filename)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	records, _ := recfile.Read(file)
+	return records, nil
+}
+
+// saveAtomically lets save write to a temp file next to path, then renames it over path.
+func saveAtomically(path string, save func(tmpPath string) error) error {
+	tmp := path + ".tmp"
+	if err := save(tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// WriteRecordsAtomic writes records to path via a temp file and rename.
+func WriteRecordsAtomic(path string, records []recfile.Record) error {
+	return saveAtomically(path, func(tmp string) error {
+		file, err := os.Create(tmp)
+		if err != nil {
+			return err
+		}
+		if err = recfile.Write(file, records); err != nil {
+			file.Close()
+			return err
+		}
+		return file.Close()
+	})
 }
 func (t NamedTile) ToRecord() recfile.Record {
 	return recfile.Record{
@@ -132,19 +173,24 @@ type IconPositionMap map[geometry.Point]textiles.IconRecord
 
 func (p IconPositionMap) ToRecords() []recfile.Record {
 	records := make([]recfile.Record, 0, len(p))
-	for pos, obj := range p {
-		records = append(records, obj.ToRecordWithPosition(pos))
+	for _, pos := range sortedPoints(p) {
+		records = append(records, p[pos].ToRecordWithPosition(pos))
 	}
 	return records
 }
-func (p IconPositionMap) ToRecordsWithoutIcons() []recfile.Record {
-	records := make([]recfile.Record, 0, len(p))
-	for pos, obj := range p {
-		record := obj.ToRecordWithPosition(pos)
-		record = record.WithoutFieldsIgnoreCase("Icon", "Foreground", "Background")
-		records = append(records, record)
+
+func sortedPoints[V any](m map[geometry.Point]V) []geometry.Point {
+	points := make([]geometry.Point, 0, len(m))
+	for pos := range m {
+		points = append(points, pos)
 	}
-	return records
+	sort.Slice(points, func(i, j int) bool {
+		if points[i].Y != points[j].Y {
+			return points[i].Y < points[j].Y
+		}
+		return points[i].X < points[j].X
+	})
+	return points
 }
 
 type Layer uint8
@@ -206,28 +252,29 @@ func (o CategoryObject) ToRecordWithPosition(pos geometry.Point) recfile.Record 
 }
 
 func (o CategoryObject) Copy() CategoryObject {
-	newMeta := make(recfile.Record, len(o.Meta))
-	copy(newMeta, o.Meta)
 	return CategoryObject{
-		Name:     o.Name,
-		Category: o.Category,
-		Meta:     newMeta,
+		Name:         o.Name,
+		Category:     o.Category,
+		IconOverride: o.IconOverride,
+		Meta:         slices.Clone(o.Meta),
 	}
 }
 
 func (o CategoryObject) WithCategory(newCat string) CategoryObject {
 	return CategoryObject{
-		Name:     o.Name,
-		Category: newCat,
-		Meta:     o.Meta,
+		Name:         o.Name,
+		Category:     newCat,
+		IconOverride: o.IconOverride,
+		Meta:         slices.Clone(o.Meta),
 	}
 }
 
 func (o CategoryObject) WithMeta(newMeta recfile.Record) CategoryObject {
 	return CategoryObject{
-		Name:     o.Name,
-		Category: o.Category,
-		Meta:     newMeta,
+		Name:         o.Name,
+		Category:     o.Category,
+		IconOverride: o.IconOverride,
+		Meta:         slices.Clone(newMeta),
 	}
 }
 
@@ -235,8 +282,8 @@ type CategoryPositionMap map[geometry.Point]CategoryObject
 
 func (m CategoryPositionMap) ToRecords() []recfile.Record {
 	records := make([]recfile.Record, 0, len(m))
-	for pos, obj := range m {
-		records = append(records, obj.ToRecordWithPosition(pos))
+	for _, pos := range sortedPoints(m) {
+		records = append(records, m[pos].ToRecordWithPosition(pos))
 	}
 	return records
 }
@@ -261,7 +308,7 @@ func (m *MapArea) CharAt(pos geometry.Point) (core.NamedColorChar, bool) {
 	}
 	layerIconFound := false
 	layerIcon := core.NamedColorChar{}
-	// order of precedence: actor, item, object, tile
+	// order of precedence (topmost first): object, item, actor, tile
 	if actor, ok := m.actors[pos]; ok {
 		layerIcon = actor.Icon
 		layerIconFound = true
@@ -291,36 +338,6 @@ func (m *MapArea) CharAt(pos geometry.Point) (core.NamedColorChar, bool) {
 	return tile.Icon, true
 }
 
-func (m *MapArea) RotateClockwise() {
-	newTiles := make([]int16, m.Dimensions.X*m.Dimensions.Y)
-	newActors := make(IconPositionMap)
-	newObjects := make(CategoryPositionMap)
-	newItems := make(CategoryPositionMap)
-	for y := 0; y < m.Dimensions.Y; y++ {
-		for x := 0; x < m.Dimensions.X; x++ {
-			newX := m.Dimensions.Y - y - 1
-			newY := x
-			newPos := geometry.Point{X: newX, Y: newY}
-			oldPos := geometry.Point{X: x, Y: y}
-			newTiles[newY*m.Dimensions.X+newX] = m.Tiles[y*m.Dimensions.X+x]
-			if actor, ok := m.actors[oldPos]; ok {
-				newActors[newPos] = actor
-			}
-			if object, ok := m.objects[oldPos]; ok {
-				newObjects[newPos] = object
-			}
-			if item, ok := m.items[oldPos]; ok {
-				newItems[newPos] = item
-			}
-		}
-	}
-	m.Tiles = newTiles
-	m.actors = newActors
-	m.objects = newObjects
-	m.items = newItems
-	m.Dimensions = geometry.Point{X: m.Dimensions.Y, Y: m.Dimensions.X}
-}
-
 type GameMap struct {
 	*MapArea
 
@@ -346,10 +363,10 @@ func NewMapArea(dimensions geometry.Point, resolver func(idx int16) NamedTile, i
 	}
 }
 
-func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) (*GameMap, []NamedTile) {
+func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, items func(cat string) core.NamedColorChar, objects func(objectType string) core.NamedColorChar) (*GameMap, []NamedTile, error) {
 	dimensions, tiles := textiles.ReadTileMap16(filepath.Join(mapDirectory, "tiles.bin"))
 	if len(tiles) == 0 {
-		return nil, nil
+		return nil, nil, fmt.Errorf("no tiles.bin found in %s", mapDirectory)
 	}
 	area := NewMapArea(dimensions, resolver, items, objects)
 	area.Tiles = tiles
@@ -357,21 +374,30 @@ func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, it
 		MapArea: area,
 	}
 
-	tileSet := LoadTileSet(filepath.Join(mapDirectory, "tileset.rec"))
+	tileSetFile := filepath.Join(mapDirectory, "tileSet.rec")
+	if !fxtools.FileExists(tileSetFile) {
+		tileSetFile = filepath.Join(mapDirectory, "tileset.rec") // older maps
+	}
+	tileSet, err := LoadTileSet(tileSetFile)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	if fxtools.FileExists(filepath.Join(mapDirectory, "zones.bin")) {
 		g.zones = textiles.ReadZones(filepath.Join(mapDirectory, "zones.bin"))
 	}
 
-	var objectRecords, itemRecords, actorRecords []recfile.Record
-	if fxtools.FileExists(filepath.Join(mapDirectory, "objects.rec")) {
-		objectRecords, _ = recfile.Read(fxtools.MustOpen(filepath.Join(mapDirectory, "objects.rec")))
+	objectRecords, err := readRecords(filepath.Join(mapDirectory, "objects.rec"))
+	if err != nil {
+		return nil, nil, err
 	}
-	if fxtools.FileExists(filepath.Join(mapDirectory, "items.rec")) {
-		itemRecords, _ = recfile.Read(fxtools.MustOpen(filepath.Join(mapDirectory, "items.rec")))
+	itemRecords, err := readRecords(filepath.Join(mapDirectory, "items.rec"))
+	if err != nil {
+		return nil, nil, err
 	}
-	if fxtools.FileExists(filepath.Join(mapDirectory, "actors.rec")) {
-		actorRecords, _ = recfile.Read(fxtools.MustOpen(filepath.Join(mapDirectory, "actors.rec")))
+	actorRecords, err := readRecords(filepath.Join(mapDirectory, "actors.rec"))
+	if err != nil {
+		return nil, nil, err
 	}
 
 	g.actors = make(IconPositionMap)
@@ -399,23 +425,84 @@ func LoadMapFromDisk(mapDirectory string, resolver func(idx int16) NamedTile, it
 	for _, record := range actorRecords {
 		if posField, hasPos := record.FindField("Position"); hasPos {
 			pos, err := geometry.NewPointFromEncodedString(posField.Value)
-			obj := textiles.NewIconRecord(record.WithoutFieldsIgnoreCase("Position"))
+			obj := NewIconRecordSafe(record.WithoutFieldsIgnoreCase("Position"))
 			if err == nil {
 				g.actors[pos] = obj
 			}
 		}
 	}
 
-	return g, tileSet
+	return g, tileSet, nil
+}
+
+// PlaceholderFields lists "Category@x,y Field" for every field still holding a CHANGEME template value.
+func (g *GameMap) PlaceholderFields() []string {
+	var found []string
+	for _, m := range []CategoryPositionMap{g.objects, g.items} {
+		for _, pos := range sortedPoints(m) {
+			for _, f := range m[pos].ToRecord() {
+				if strings.Contains(strings.ToLower(f.Value), "changeme") {
+					found = append(found, fmt.Sprintf("%s@%d,%d %s", m[pos].Category, pos.X, pos.Y, f.Name))
+				}
+			}
+		}
+	}
+	for _, pos := range sortedPoints(g.actors) {
+		for _, f := range g.actors[pos].ToRecord() {
+			if strings.Contains(strings.ToLower(f.Value), "changeme") {
+				found = append(found, fmt.Sprintf("actor@%d,%d %s", pos.X, pos.Y, f.Name))
+			}
+		}
+	}
+	return found
+}
+
+// uniqueIdField is the record field the game uses as the unique name of a placed object category.
+// Elevator/NamedLocation: "identifier"; Transition: "Location" (registered as a named location).
+func uniqueIdField(category string) string {
+	switch strings.ToLower(category) {
+	case "elevator", "namedlocation":
+		return "Identifier"
+	case "transition":
+		return "Location"
+	}
+	return ""
+}
+
+func (g *GameMap) idTaken(category, field, id string) bool {
+	for _, o := range g.objects {
+		if uniqueIdField(o.Category) != "" && strings.EqualFold(uniqueIdField(o.Category), field) && o.Meta.FindValueForKeyIgnoreCase(field) == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *GameMap) uniqueObject(o CategoryObject) CategoryObject {
+	field := uniqueIdField(o.Category)
+	id := o.Meta.FindValueForKeyIgnoreCase(field)
+	if field == "" || id == "" || !g.idTaken(o.Category, field, id) {
+		return o
+	}
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s_%d", id, n)
+		if !g.idTaken(o.Category, field, candidate) {
+			return o.WithMeta(slices.Clone(o.Meta).WithKeyValueIgnoreCase(field, candidate))
+		}
+	}
 }
 
 func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
-	os.Mkdir(mapDirectory, 0755)
+	if err := os.Mkdir(mapDirectory, 0755); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
 
 	mapName := path.Base(mapDirectory)
 	tiles, tileSet := g.generateTileSet()
 
-	err := textiles.SaveTileMap16(tiles, g.Dimensions, filepath.Join(mapDirectory, "tiles.bin"))
+	err := saveAtomically(filepath.Join(mapDirectory, "tiles.bin"), func(tmp string) error {
+		return textiles.SaveTileMap16(tiles, g.Dimensions, tmp)
+	})
 	if err != nil {
 		return err
 	}
@@ -425,7 +512,9 @@ func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 		return err
 	}
 
-	zoneErr := textiles.SaveZones(filepath.Join(mapDirectory, "zones.bin"), g.zones)
+	zoneErr := saveAtomically(filepath.Join(mapDirectory, "zones.bin"), func(tmp string) error {
+		return textiles.SaveZones(tmp, g.zones)
+	})
 	if zoneErr != nil {
 		return zoneErr
 	}
@@ -440,29 +529,21 @@ func (g *GameMap) SaveMapToDisk(mapDirectory string) error {
 			recfile.Field{Name: "IndoorAmbientLight", Value: "(1.0, 1.0, 1.0)"},
 		}
 
-		err = recfile.Write(fxtools.MustCreate(metaFile), []recfile.Record{metaRecord})
+		err = WriteRecordsAtomic(metaFile, []recfile.Record{metaRecord})
 		if err != nil {
 			return err
 		}
 	}
 
-	objectRecords := g.objects.ToRecords()
-	itemRecords := g.items.ToRecords()
-	actorRecords := g.actors.ToRecords()
-
-	err = recfile.Write(fxtools.MustCreate(filepath.Join(mapDirectory, "objects.rec")), objectRecords)
+	err = WriteRecordsAtomic(filepath.Join(mapDirectory, "objects.rec"), g.objects.ToRecords())
 	if err != nil {
 		return err
 	}
-	err = recfile.Write(fxtools.MustCreate(filepath.Join(mapDirectory, "items.rec")), itemRecords)
+	err = WriteRecordsAtomic(filepath.Join(mapDirectory, "items.rec"), g.items.ToRecords())
 	if err != nil {
 		return err
 	}
-	err = recfile.Write(fxtools.MustCreate(filepath.Join(mapDirectory, "actors.rec")), actorRecords)
-	if err != nil {
-		return err
-	}
-	return nil
+	return WriteRecordsAtomic(filepath.Join(mapDirectory, "actors.rec"), g.actors.ToRecords())
 }
 
 func (g *GameMap) Copy(area geometry.Rect) {
@@ -481,6 +562,7 @@ func (g *GameMap) GetCopyBuffer() *MapArea {
 }
 
 func (g *GameMap) copyArea(area geometry.Rect) *MapArea {
+	area = area.Intersect(geometry.NewRect(0, 0, g.Dimensions.X, g.Dimensions.Y))
 	copyBuffer := NewMapArea(area.Size(), g.resolveTile, g.resolveItem, g.resolveObject)
 	for y := 0; y < area.Size().Y; y++ {
 		for x := 0; x < area.Size().X; x++ {
@@ -496,6 +578,17 @@ func (g *GameMap) copyArea(area geometry.Rect) *MapArea {
 			}
 			if item, ok := g.items[orgPos]; ok {
 				copyBuffer.items[pos] = item.Copy()
+			}
+			for name, points := range g.zones {
+				if points[orgPos] {
+					if copyBuffer.zones == nil {
+						copyBuffer.zones = make(map[string]map[geometry.Point]bool)
+					}
+					if copyBuffer.zones[name] == nil {
+						copyBuffer.zones[name] = make(map[geometry.Point]bool)
+					}
+					copyBuffer.zones[name][pos] = true
+				}
 			}
 		}
 	}
@@ -514,12 +607,20 @@ func (g *GameMap) pasteArea(area *MapArea, pos geometry.Point) {
 			delete(g.actors, newPos)
 			delete(g.objects, newPos)
 			delete(g.items, newPos)
+			for _, points := range g.zones {
+				delete(points, newPos)
+			}
+			for name, points := range area.zones {
+				if points[oldPos] {
+					g.SetZone(newPos, name)
+				}
+			}
 			g.Tiles[newPos.Y*g.Dimensions.X+newPos.X] = tileIdx
 			if actor, ok := area.actors[oldPos]; ok {
 				g.actors[newPos] = actor
 			}
 			if object, ok := area.objects[oldPos]; ok {
-				g.objects[newPos] = object
+				g.objects[newPos] = g.uniqueObject(object)
 			}
 			if item, ok := area.items[oldPos]; ok {
 				g.items[newPos] = item
@@ -528,7 +629,14 @@ func (g *GameMap) pasteArea(area *MapArea, pos geometry.Point) {
 	}
 }
 
+func (g *GameMap) inBounds(pos geometry.Point) bool {
+	return pos.X >= 0 && pos.X < g.Dimensions.X && pos.Y >= 0 && pos.Y < g.Dimensions.Y
+}
+
 func (g *GameMap) SetTile(pos geometry.Point, tile int16) {
+	if !g.inBounds(pos) {
+		return
+	}
 	g.Tiles[pos.Y*g.Dimensions.X+pos.X] = tile
 }
 
@@ -563,162 +671,15 @@ func (g *GameMap) EditActorAt(app *cview.Application, panels *cview.Panels, pos 
 	}
 
 	cview.EditRecord(app, panels, actor.ToRecord(), func(record recfile.Record) {
-		obj := textiles.NewIconRecord(record)
+		obj := NewIconRecordSafe(record)
 		g.actors[pos] = obj
 	})
-}
-func (g *GameMap) EditDoorAt(app *cview.Application, panels *cview.Panels, pos geometry.Point) {
-	door, objExists := g.objects[pos]
-	if !objExists {
-		return
-	}
-	if !strings.HasSuffix(strings.ToLower(door.Category), "door") {
-		return
-	}
-	/*
-			Category: LockedDoor
-			AudioCue: wood_door
-			Description: a door
-			LockFlag: bar_door_security
-			NumberLock: 1996
-		    LockDifficulty: medium
-	*/
-	dmap := door.Meta.ToLowerMap(",")
-	diffAsNumberString := diffToNumberString(dmap.GetStringOrDefault("lockdifficulty", "veryeasy"))
-	cview.OpenModalForm(app, panels, []cview.FormElementDescription{
-		{
-			FieldName:    "category",
-			PrefillValue: cview.TypedString(door.Category),
-			Label:        "Category",
-			FieldType:    cview.FieldTypeString, // should be select
-		},
-		{
-			FieldName:    "audio_cue",
-			PrefillValue: cview.TypedString(dmap.GetStringOrDefault("audiocue", "")),
-			Label:        "Audio Cue",
-			FieldType:    cview.FieldTypeString, // should be select
-		},
-		{
-			FieldName:    "description",
-			Label:        "Description",
-			PrefillValue: cview.TypedString(dmap.GetStringOrDefault("description", "a door")),
-		},
-		{
-			FieldName:    "lock_flag",
-			Label:        "Lock Flag",
-			PrefillValue: cview.TypedString(dmap.GetStringOrDefault("lockflag", "")),
-			FieldType:    cview.FieldTypeString,
-		},
-		{
-			FieldName:    "number_lock",
-			Label:        "Number Lock",
-			PrefillValue: cview.TypedString(dmap.GetStringOrDefault("numberlock", "")),
-			FieldType:    cview.FieldTypeString,
-		},
-		{
-			FieldName:    "lock_difficulty",
-			Label:        "Lock Difficulty",
-			PrefillValue: cview.TypedString(diffAsNumberString),
-			FieldType:    cview.FieldTypeIntegerSlider, // should be select?
-		},
-	}, func(values map[string]cview.TypedString) {
-		oldMeta := door.Meta
-		for k, v := range values {
-			if k == "category" {
-				continue
-			}
-			value := v.AsString()
-			if k == "lock_difficulty" {
-				value = numberStringToDiff(value)
-			}
-			oldMeta = oldMeta.WithKeyValueIgnoreCase(k, value)
-		}
-		door = door.WithCategory(values["category"].AsString())
-		door = door.WithMeta(oldMeta)
-		g.objects[pos] = door
-	})
-}
-
-/*
-case "trivial": = "0"
-
-	return Trivial
-
-case "veryeasy":
-
-	return VeryEasy
-
-case "easy":
-
-	return Easy
-
-case "medium":
-
-	return Medium
-
-case "hard":
-
-	return Hard
-
-case "veryhard":
-
-	return VeryHard
-
-case "superhuman":
-
-	return SuperHuman
-*/
-func diffToNumberString(orDefault string) string {
-	switch strings.ToLower(orDefault) {
-	case "trivial":
-		return "0"
-	case "veryeasy":
-		return "1"
-	case "easy":
-		return "2"
-	case "medium":
-		return "3"
-	case "hard":
-		return "4"
-	case "veryhard":
-		return "5"
-	case "superhuman":
-		return "6"
-	}
-	return orDefault
-}
-func numberStringToDiff(orDefault string) string {
-	switch orDefault {
-	case "0":
-		return "Trivial"
-	case "1":
-		return "VeryEasy"
-	case "2":
-		return "Easy"
-	case "3":
-		return "Medium"
-	case "4":
-		return "Hard"
-	case "5":
-		return "VeryHard"
-	case "6":
-		return "SuperHuman"
-	}
-	return orDefault
 }
 func (g *GameMap) EditObjectAt(app *cview.Application, panels *cview.Panels, pos geometry.Point) {
 	object, exists := g.objects[pos]
 	if !exists {
 		return
 	}
-
-	/* TODO: bugfix
-	   if strings.HasSuffix(strings.ToLower(object.Category), "door") {
-	   	g.EditDoorAt(app, panels, pos)
-	   	return
-	   }
-
-	*/
 
 	cview.EditRecord(app, panels, object.ToRecord(), func(record recfile.Record) {
 		obj := NewCategoryObject(record)
@@ -740,6 +701,9 @@ func (g *GameMap) EditItemAt(app *cview.Application, panels *cview.Panels, pos g
 
 func (g *GameMap) MapInfoAt(pos geometry.Point) []string {
 	var info []string
+	if !g.inBounds(pos) {
+		return nil
+	}
 	if actor, ok := g.actors[pos]; ok {
 		info = append(info, actor.String())
 	}
@@ -826,4 +790,15 @@ func (g *GameMap) RemoveZoneAt(mouse geometry.Point, zone string) {
 
 func (g *GameMap) GetEmptyCopyBuffer(dimensions geometry.Point) *MapArea {
 	return NewMapArea(dimensions, g.resolveTile, g.resolveItem, g.resolveObject)
+}
+
+// NewIconRecordSafe guards textiles.NewIconRecord, which panics on an empty icon value.
+func NewIconRecordSafe(record recfile.Record) textiles.IconRecord {
+	record = slices.Clone(record)
+	for i, f := range record {
+		if strings.EqualFold(f.Name, "icon") && f.Value == "" {
+			record[i].Value = "?"
+		}
+	}
+	return textiles.NewIconRecord(record)
 }
