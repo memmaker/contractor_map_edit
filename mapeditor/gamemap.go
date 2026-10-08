@@ -664,6 +664,43 @@ func (g *GameMap) RemoveItem(pos geometry.Point) {
 	delete(g.items, pos)
 }
 
+// MoveTopmostAt moves the object, else item, else actor at from to to.
+// It refuses when to already holds the same kind of entity.
+func (g *GameMap) MoveTopmostAt(from, to geometry.Point) bool {
+	if from == to || !to.In(geometry.NewRect(0, 0, g.Dimensions.X, g.Dimensions.Y)) {
+		return false
+	}
+	if o, ok := g.objects[from]; ok {
+		if _, taken := g.objects[to]; taken {
+			return false
+		}
+		delete(g.objects, from)
+		g.objects[to] = o
+		return true
+	}
+	if i, ok := g.items[from]; ok {
+		if _, taken := g.items[to]; taken {
+			return false
+		}
+		delete(g.items, from)
+		g.items[to] = i
+		return true
+	}
+	if a, ok := g.actors[from]; ok {
+		if _, taken := g.actors[to]; taken {
+			return false
+		}
+		delete(g.actors, from)
+		g.actors[to] = a
+		return true
+	}
+	return false
+}
+
+func (g *GameMap) IsEntityAt(pos geometry.Point) bool {
+	return g.IsObjectAt(pos) || g.IsItemAt(pos) || g.IsActorAt(pos)
+}
+
 func (g *GameMap) EditActorAt(app *cview.Application, panels *cview.Panels, pos geometry.Point) {
 	actor, exists := g.actors[pos]
 	if !exists {

@@ -32,6 +32,7 @@ type MapEditor struct {
 	pasteArea               *MapArea
 	currentZone             string
 	lastTileIndex           int
+	dragFrom                *geometry.Point // set while dragging an entity to a new spot
 }
 
 func (m *MapEditor) DefaultFillCondition(source geometry.Point, curr geometry.Point, next geometry.Point) bool {
@@ -211,6 +212,10 @@ func (m *MapEditor) overlayRunes(i rune, selection []geometry.Point) {
 	}
 }
 func (m *MapEditor) onMouseMoved(mouse geometry.Point) {
+	if m.dragFrom != nil {
+		m.overlayRunes('*', []geometry.Point{mouse})
+		return
+	}
 	if m.isLeftDown {
 		selectedPositions := m.currentBrush.DraggedOver(mouse)
 		m.overlayRunes('*', selectedPositions)
@@ -218,11 +223,22 @@ func (m *MapEditor) onMouseMoved(mouse geometry.Point) {
 }
 
 func (m *MapEditor) onMouseLeftDown(mouse geometry.Point) {
+	if m.pasteArea == nil && m.currentZone == "" && m.gameMap.IsEntityAt(mouse) { // grab it instead of painting
+		from := mouse
+		m.dragFrom = &from
+		return
+	}
 	m.currentBrush.StartDrawing(mouse)
 	m.lastDrawStart = mouse
 }
 
 func (m *MapEditor) onMouseLeftUp(mouse geometry.Point) {
+	if m.dragFrom != nil {
+		m.gameMap.MoveTopmostAt(*m.dragFrom, mouse)
+		m.dragFrom = nil
+		clear(m.overlay)
+		return
+	}
 	selectedPositions := m.currentBrush.StopDrawing(mouse)
 	m.lastDrawStop = mouse
 	clear(m.overlay)

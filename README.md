@@ -58,6 +58,7 @@ Load/Save Tileset, Load/Save Map and Quit. The brush bar picks the tool.
 | Input | Action |
 |---|---|
 | Left click / drag | Paint with the current brush |
+| Left drag from an object, item or actor | Move it (object first, then item, then actor). Refused if the target already holds the same kind |
 | Right click | Edit the topmost thing under the cursor (object, then item, then actor) |
 | `F1`–`F5` | Pen, line, rectangle, circle, fill |
 | `Ctrl+C` | Select an area to copy (tiles, zones, objects, items, actors) |
